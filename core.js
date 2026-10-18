@@ -271,8 +271,10 @@ export function followUps(doc, today) {
       const past = occurrences(b, addDays(today, -60), addDays(today, -1)).filter((d) => payState(doc, b, d, today) === 'overdue');
       if (past.length) { p = 1; t.push('Not paid yet — was due ' + fmtDate(past[past.length - 1])); }
     }
-    if (nd && b.freq === 'Every 5 yrs' && days <= 90) { p = Math.min(p, 1); t.push('Renewal due ' + fmtDate(nd, { year: true }) + ' — renew'); }
-    if (nd && LUMP.has(b.freq) && days <= 14) { p = Math.min(p, 1); t.push(money(amt, 0) + ' lump sum due in ' + days + ' day(s)' + (b.payMethod === 'manual' ? ' — pay it yourself' : b.accountId ? ' — check funds in ' + accountName(doc, b.accountId) : '')); }
+    // Already paid early? Then the "due soon" warnings for that date don't apply.
+    const ndPaid = nd ? payState(doc, b, nd, today) === 'paid' : false;
+    if (nd && !ndPaid && b.freq === 'Every 5 yrs' && days <= 90) { p = Math.min(p, 1); t.push('Renewal due ' + fmtDate(nd, { year: true }) + ' — renew'); }
+    if (nd && !ndPaid && LUMP.has(b.freq) && days <= 14) { p = Math.min(p, 1); t.push(money(amt, 0) + ' lump sum due in ' + days + ' day(s)' + (b.payMethod === 'manual' ? ' — pay it yourself' : b.accountId ? ' — check funds in ' + accountName(doc, b.accountId) : '')); }
     if (nd && rv.status !== 'na' && (b.freq === 'Annual' || b.freq === 'Every 5 yrs') && days <= 45 && !reviewCurrentStrict(b, today)) { p = Math.min(p, 1); t.push('Renews in ' + days + ' days — review & compare before it renews'); }
     if (rv.status === 'overdue') { p = Math.min(p, 1); t.push('Review overdue (last reviewed ' + fmtDate(b.review.last, { year: true }) + ')'); }
     if (rv.status === 'future') { p = Math.min(p, 2); t.push('Last-reviewed date is in the future — check it'); }
