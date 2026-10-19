@@ -1,9 +1,9 @@
 // Offline support. Only touches this app's own files and caches (names start
 // with "bills-"), so your other apps on the same site are left alone.
-const VERSION = 'bills-v1.0.2';
+const VERSION = 'bills-v1.1.0';
 const SHELL = [
   './', './index.html', './styles.css', './manifest.webmanifest',
-  './app.js', './core.js', './crypto.js', './store.js', './ui.js', './qrcode.js',
+  './app.js', './core.js', './crypto.js', './store.js', './ui.js', './dropbox.js', './qrcode.js',
   './icon-192.png', './icon-512.png', './maskable-512.png',
   './ibm-plex-sans-latin-400-normal.woff2', './ibm-plex-sans-latin-500-normal.woff2',
   './ibm-plex-sans-latin-600-normal.woff2', './ibm-plex-sans-latin-700-normal.woff2',

@@ -1,11 +1,14 @@
 // Bills — the phone app. Screens are rebuilt from the saved data on every change.
 import * as C from './core.js';
 import * as St from './store.js';
-import { makeSetupCode, readSetupCode } from './crypto.js';
+import { makeSetupCode, readSetupCode, unlock } from './crypto.js';
+import * as DB from './dropbox.js';
+
+const APP_VERSION = '1.1';
 import { h, raw, esc, icon, toast, openSheet, closeSheet, confirmSheet, download, pickFile, copyText } from './ui.js';
 
 const PALETTE = [['#2a78d6', 'Blue'], ['#eb6834', 'Orange'], ['#1baf7a', 'Aqua'], ['#eda100', 'Yellow'], ['#e87ba4', 'Pink'], ['#008300', 'Green'], ['#6250d6', 'Violet'], ['#e34948', 'Red'], ['#8A948D', 'Grey']];
-const S = { doc: null, dev: null, route: '', params: [], ui: { range: 7, open: {}, q: '', rKind: 'fy', rInv: false, rTable: false, rSel: null, calSel: null, calMonth: null }, sync: 'off', syncErr: '' };
+const S = { doc: null, dev: null, route: '', params: [], ui: { range: 7, open: {}, q: '', rKind: 'fy', rInv: false, rTable: false, rSel: null, calSel: null, calMonth: null }, sync: 'off', syncErr: '', dbx: 'off', dbxErr: '' };
 const $app = () => document.getElementById('app');
 const tz = () => (S.doc && S.doc.settings && S.doc.settings.timezone) || 'Australia/Sydney';
 const today = () => C.todayISO(new Date(), tz());
@@ -23,6 +26,7 @@ async function commit(text, fn) {
   await St.saveLocal(S.doc);
   render();
   queueSync();
+  queueDbx();
 }
 function touch(o) { o.u = Date.now(); o.by = who(); return o; }
 function queueSync(ms = 2500) { if (!S.dev.github) return; clearTimeout(syncTimer); syncTimer = setTimeout(doSync, ms); }
@@ -38,11 +42,112 @@ async function doSync(manual) {
     if (rev !== startRev) { S.doc = C.mergeDocs(r.doc, S.doc); queueSync(1000); } else S.doc = r.doc;
     await St.saveLocal(S.doc); await St.saveDevice(S.dev);
     S.sync = 'ok'; S.syncErr = '';
-    if (St.canon(S.doc) !== before) render(); else renderStatusOnly();
+    if (St.canon(S.doc) !== before) { render(); queueDbx(1000); } else renderStatusOnly();
     if (manual) toast(r.status === 'pushed' ? 'Saved to GitHub' : 'Up to date');
   } catch (e) { S.sync = 'error'; S.syncErr = e.message; renderStatusOnly(); if (manual) toast(e.message, 5000); }
   finally { syncing = false; }
 }
+// ---------- Dropbox (an extra locked copy, plus daily snapshots) ----------
+let dbxTimer = null, dbxBusy = false, dbxRetry = null;
+const saveDev = () => St.saveDevice(S.dev);
+const dbxClient = () => DB.client(S.dev, saveDev);
+function queueDbx(ms = 4000) { if (!DB.isOn(S.dev) || !S.doc) return; clearTimeout(dbxTimer); dbxTimer = setTimeout(doDbx, ms); }
+async function doDbx(manual) {
+  if (!DB.isOn(S.dev) || !S.doc) return;
+  if (!S.dev.passphrase) { S.dbx = 'error'; S.dbxErr = 'Enter the family passphrase (Sharing & backup) so the Dropbox copy can be locked.'; renderStatusOnly(); return; }
+  if (!navigator.onLine) { if (manual) toast("You're offline — it will go to Dropbox when you're back online"); return; }
+  if (dbxBusy) { queueDbx(1500); return; }
+  dbxBusy = true; S.dbx = 'syncing'; renderStatusOnly();
+  try {
+    const cl = dbxClient(), before = St.canon(S.doc), startRev = rev;
+    const r = await DB.syncDoc(S.doc, S.dev, saveDev, cl);
+    if (rev !== startRev) { S.doc = C.mergeDocs(r.doc, S.doc); queueDbx(1000); } else S.doc = r.doc;
+    await St.saveLocal(S.doc);
+    S.dbx = 'ok'; S.dbxErr = '';
+    if (St.canon(S.doc) !== before) { render(); queueSync(1000); } else renderStatusOnly();
+    DB.maybeSnapshot(S.doc, S.dev, saveDev, cl).catch(() => {});
+    if (manual) toast(r.status === 'pushed' ? 'Saved to Dropbox' : 'Dropbox is up to date');
+  } catch (e) {
+    S.dbx = 'error'; S.dbxErr = (!navigator.onLine || e instanceof TypeError) ? "Couldn't reach Dropbox — it will try again shortly." : e.message;
+    if (S.dev.dbx) { S.dev.dbx.error = S.dbxErr; await saveDev(); }
+    renderStatusOnly(); if (manual) toast(S.dbxErr, 5000);
+    clearTimeout(dbxRetry); if (DB.isOn(S.dev)) dbxRetry = setTimeout(doDbx, 120000);
+  } finally { dbxBusy = false; if (S.route === 'sync') render(); }
+}
+function dbxLine() {
+  if (!DB.isOn(S.dev)) return 'Not connected';
+  if (S.dbx === 'syncing') return 'Saving to Dropbox…';
+  if (S.dbx === 'error') return 'Problem: ' + S.dbxErr;
+  const last = S.dev.dbx.lastSync;
+  return 'In Dropbox ✓' + (last ? ' · ' + new Date(last).toLocaleString('en-AU', { dateStyle: 'medium', timeStyle: 'short' }) : '');
+}
+// Ask for the family passphrase. With a locked copy to test against, keeps asking until it opens it.
+async function askPassphrase(env, why) {
+  for (let i = 0; i < 3; i++) {
+    const p = prompt(why || 'Family passphrase:');
+    if (!p) return null;
+    if (!env) return p;
+    try { const d = await unlock(env, p); return { pass: p, doc: d }; } catch { toast("That passphrase didn't open it — try again", 3500); }
+  }
+  return null;
+}
+async function chooseNewPassphrase() {
+  const a = prompt('Choose a family passphrase to lock the Dropbox copy (at least 12 characters — write it down):');
+  if (!a) return null;
+  if (a.length < 12) { toast('Use at least 12 characters'); return null; }
+  if (prompt('Type the passphrase again:') !== a) { toast("The two passphrases don't match"); return null; }
+  return a;
+}
+// After Dropbox sends the phone back here with ?code=…
+async function dbxReturn(params) {
+  history.replaceState(null, '', DB.redirectUri() + '#/sync');
+  try {
+    await DB.finishConnect(S.dev, saveDev, params);
+    const cl = dbxClient();
+    try { const a = await cl.account(); S.dev.dbx.email = a.email; await saveDev(); } catch {}
+    const rm = await cl.meta(DB.LIVE);
+    let remoteDoc = null;
+    if (rm) {
+      const env = JSON.parse(await cl.download(DB.LIVE));
+      if (S.dev.passphrase) { try { remoteDoc = await unlock(env, S.dev.passphrase); } catch { S.dev.passphrase = ''; } }
+      if (!remoteDoc) {
+        const got = await askPassphrase(env, 'Family passphrase — to unlock your bills in Dropbox:');
+        if (!got) { S.dev.dbx = null; await saveDev(); toast('Dropbox not connected — the passphrase is needed to open your bills', 5000); return; }
+        S.dev.passphrase = got.pass; remoteDoc = got.doc;
+      }
+    } else if (!S.dev.passphrase) {
+      const p = await chooseNewPassphrase();
+      if (!p) { S.dev.dbx = null; await saveDev(); toast('Dropbox not connected', 4000); return; }
+      S.dev.passphrase = p;
+    }
+    await saveDev();
+    if (!S.doc && !remoteDoc) { toast('Dropbox is connected, but there are no bills in it yet', 5000); render(); return; }
+    const wasEmpty = !S.doc;
+    S.doc = S.doc || St.joinDoc();
+    await doDbx();
+    if (wasEmpty) { await askName(); toast('Your bills are back — ' + C.liveBills(S.doc).length + ' bills from Dropbox', 5000); location.hash = '#/'; }
+    else toast('Dropbox connected — your bills are backed up there too', 4000);
+    queueSync(500);
+  } catch (e) { toast(e.message, 6000); }
+  render();
+}
+// Swap in an older copy (backup history or a Dropbox snapshot) on every phone.
+async function replaceDoc(old, label) {
+  old.updatedAt = Date.now();
+  const bump = (o) => { if (o && typeof o === 'object') o.u = Date.now(); };
+  const KEYS = ['accounts', 'types', 'properties', 'bills', 'payments', 'people', 'others', 'payOverrides'];
+  KEYS.forEach((k) => (old[k] || []).forEach(bump));
+  // anything added since that version is marked deleted so the merge doesn't bring it back
+  KEYS.forEach((k) => { old[k] = old[k] || []; const ids = new Set(old[k].map((x) => x.id)); for (const x of (S.doc && S.doc[k]) || []) if (!ids.has(x.id)) old[k].push({ ...x, del: true, u: Date.now() }); });
+  bump(old.settings);
+  old.transferChecks = old.transferChecks || {};
+  for (const k of Object.keys(old.transferChecks)) bump(old.transferChecks[k]);
+  for (const k of Object.keys((S.doc && S.doc.transferChecks) || {})) if (!old.transferChecks[k]) old.transferChecks[k] = { undone: true, u: Date.now(), by: who() };
+  S.doc = old;
+  await commit(label, () => {});
+  await doSync(true);
+}
+
 function renderStatusOnly() { const el = document.getElementById('syncdot'); if (el) el.outerHTML = syncDot().toString(); }
 function syncDot() {
   if (!S.dev || !S.dev.github) return h`<span id="syncdot"></span>`;
@@ -116,6 +221,7 @@ function scrUpcoming() {
   const pending = (d.settings.payCheckPending || []).length;
   return h`
   ${head('Upcoming', h`<a class="icon-btn" href="#/reports" aria-label="Reports">${icon('chart')}</a><a class="icon-btn brand" href="#/edit/new" aria-label="Add a bill">${icon('plus')}</a>`)}
+  ${!DB.isOn(S.dev) ? h`<a class="banner amber row" href="#/sync" style="color:inherit">${icon('warn', 20)}<span class="grow">Your bills aren't in Dropbox yet. <b>Connect Dropbox</b> so clearing Chrome can't lose them.</span>${icon('next', 18)}</a>` : S.dbx === 'error' ? h`<a class="banner red row" href="#/sync" style="color:inherit">${icon('warn', 20)}<span class="grow">Dropbox backup problem: ${S.dbxErr}</span>${icon('next', 18)}</a>` : ''}
   ${pending ? h`<a class="banner amber row" href="#/checkpay" style="color:inherit">${icon('warn', 20)}<span class="grow">Confirm how <b>${pending}</b> imported bills are paid (direct debit or you pay them).</span>${icon('next', 18)}</a>` : ''}
   <section class="hero" aria-label="Summary">
     <div class="seg" role="group" aria-label="Range"><button data-act="range" data-v="7" aria-pressed="${range === 7}">Next 7 days</button><button data-act="range" data-v="30" aria-pressed="${range === 30}">Next 30 days</button></div>
@@ -297,10 +403,10 @@ function scrSettings() {
   ${link('#/others', 'People you pay bills for', (d.others || []).filter((o) => !o.del).map((o) => o.name).join(' · ') || 'None')}
   ${link('#/checkpay', 'How each bill is paid', (d.settings.payCheckPending || []).length ? (d.settings.payCheckPending.length + ' to confirm') : 'All confirmed')}</div>
   <div class="eyebrow">Sharing, backup & Excel</div>
-  <div class="card list">${link('#/sync', 'Sharing with Lyndsey & backup', S.dev.github ? 'Connected to ' + S.dev.github.owner + '/' + S.dev.github.repo + (S.dev.lastSync ? ' · last synced ' + new Date(S.dev.lastSync).toLocaleString('en-AU', { dateStyle: 'medium', timeStyle: 'short' }) : '') : 'Not connected — this phone only')}
+  <div class="card list">${link('#/sync', 'Sharing with Lyndsey & backup', [S.dev.github ? 'GitHub ✓' + (S.dev.lastSync ? ' ' + new Date(S.dev.lastSync).toLocaleString('en-AU', { dateStyle: 'medium', timeStyle: 'short' }) : '') : 'GitHub not connected', DB.isOn(S.dev) ? (S.dbx === 'error' ? 'Dropbox problem' : 'Dropbox ✓') : 'Dropbox not connected'].join(' · '))}
   ${link('#/excel', 'Excel workbook', 'Refresh button for tab 11 · or download a CSV')}
   ${link('#/activity', 'Recent changes', 'Who changed what')}</div>
-  <div class="card pad small muted" style="line-height:1.5">This phone: <b>${S.dev.name || 'not named'}</b> · <button class="btn small ghost" data-act="rename-device">Change</button><br>Data imported ${d.importedAt ? C.fmtDate(d.importedAt, { year: true }) : '—'}${d.importedFrom ? ' from ' + d.importedFrom : ''}. Version 1.0.</div>`;
+  <div class="card pad small muted" style="line-height:1.5">This phone: <b>${S.dev.name || 'not named'}</b> · <button class="btn small ghost" data-act="rename-device">Change</button><br>Data imported ${d.importedAt ? C.fmtDate(d.importedAt, { year: true }) : '—'}${d.importedFrom ? ' from ' + d.importedFrom : ''}. Version ${APP_VERSION}.</div>`;
 }
 
 function scrActivity() {
@@ -650,20 +756,23 @@ function scrSync() {
   const dev = S.dev;
   if (!dev.github) return h`${back('#/settings', 'Sharing & backup')}
   <div class="small" style="color:var(--ink2);line-height:1.5">Connect this phone to your private <b>bills-data</b> repo on GitHub. Everything is locked on the phone with your family passphrase before it's sent, so GitHub only ever stores scrambled data.</div>
-  <form data-form="connect" class="card pad stack-lg"><h3>First phone (Shaun)</h3>
+  ${!S.doc ? h`<div class="banner green small" style="line-height:1.5"><b>Getting your bills back?</b> Fill in the box below with your access key and the <b>same passphrase as before</b> — everything comes back from GitHub. No access key? Make a new one (bills-data only, Contents: Read and write).</div>` : ''}
+  <form data-form="connect" class="card pad stack-lg"><h3>${S.doc ? 'First phone (Shaun)' : 'Restore from GitHub'}</h3>
     <div class="grid2"><label class="field">GitHub user<input name="owner" value="sskehan" autocapitalize="off"></label><label class="field">Private repo<input name="repo" value="bills-data" autocapitalize="off"></label></div>
     <label class="field">Access key (fine-grained token)<input name="token" autocomplete="off" autocapitalize="off" placeholder="github_pat_…"><span class="hint">Only for the bills-data repo, with Contents: Read and write.</span></label>
     <label class="field">Family passphrase<input name="pass" type="password" autocomplete="new-password"><span class="hint">At least 12 characters. Write it down — without it the backup can't be opened.</span></label>
     <label class="field">Passphrase again<input name="pass2" type="password" autocomplete="new-password"></label>
     <label class="field">Whose phone is this?<input name="name" value="${dev.name || 'Shaun'}"></label>
-    <button class="btn" type="submit">Connect & back up now</button></form>
+    <button class="btn" type="submit">${S.doc ? 'Connect & back up now' : 'Get my bills back'}</button></form>
   <form data-form="join" class="card pad stack-lg"><h3>Joining (Lyndsey, or a new phone)</h3>
     <label class="field">Setup code<textarea name="code" placeholder="BILLS1.…" style="font-family:var(--mono);font-size:12px"></textarea></label>
     <button class="btn small ghost" type="button" data-act="scan" style="align-self:flex-start">Scan the QR code instead</button>
     <label class="field">Family passphrase<input name="pass" type="password" autocomplete="current-password"></label>
     <label class="field">Whose phone is this?<input name="name" value="${dev.name || 'Lyndsey'}"></label>
     <button class="btn" type="submit">Join</button></form>
-  <div class="card pad stack"><h3>Without GitHub</h3><div class="small muted">You can still save a locked backup file and restore it on another phone.</div><div class="grid2"><button class="btn small ghost" data-act="dlbackup">Save backup file</button><button class="btn small ghost" data-act="restorefile">Restore from file</button></div></div>`;
+  ${dbxPanel()}
+  <div class="card pad stack"><h3>Without GitHub</h3><div class="small muted">You can still save a locked backup file and restore it on another phone.</div><div class="grid2"><button class="btn small ghost" data-act="dlbackup">Save backup file</button><button class="btn small ghost" data-act="restorefile">Restore from file</button></div></div>
+  ${clearWarn()}`;
   return h`${back('#/settings', 'Sharing & backup')}
   <div class="hero"><div class="row" style="gap:10px">${icon('shield', 22)}<b style="font-size:17px">${S.sync === 'error' ? 'Sync problem' : 'Everything is backed up'}</b></div>
     <div class="sub">${S.sync === 'error' ? S.syncErr : 'Saved after every change to ' + dev.github.owner + '/' + dev.github.repo + ', locked with your family passphrase.'} ${dev.lastSync ? 'Last sync ' + new Date(dev.lastSync).toLocaleString('en-AU', { dateStyle: 'medium', timeStyle: 'short' }) + '.' : ''}</div>
@@ -671,8 +780,26 @@ function scrSync() {
   <div class="card pad stack"><h3>Add a phone</h3><div class="small muted">On the other phone open the Bills link, go to Settings → Sharing & backup → Join, scan this code (or paste it), then type the family passphrase. The code is locked with the passphrase, so it's useless on its own.</div>
     <button class="btn sec" data-act="setupcode">Show setup code</button><div id="setupcode"></div></div>
   <div class="card pad stack"><div class="between"><h3>Backup history</h3><button class="btn small ghost" data-act="history">Load</button></div><div class="small muted">Every saved version is kept on GitHub. Roll the whole app back if something was deleted by mistake.</div><div id="history"></div></div>
+  ${dbxPanel()}
   <div class="card pad stack"><h3>Extra copy</h3><div class="small muted">Save a locked file to Google Drive or your NAS now and then — it opens with the same passphrase.</div><div class="grid2"><button class="btn small ghost" data-act="dlbackup">Save backup file</button><button class="btn small ghost" data-act="restorefile">Restore from file</button></div></div>
-  <div class="card pad stack"><h3>This phone</h3><div class="small muted">${dev.name || 'Not named'} · connected to ${dev.github.owner}/${dev.github.repo}</div><button class="btn small danger" data-act="disconnect" style="align-self:flex-start">Disconnect this phone</button></div>`;
+  <div class="card pad stack"><h3>This phone</h3><div class="small muted">${dev.name || 'Not named'} · connected to ${dev.github.owner}/${dev.github.repo}</div><button class="btn small danger" data-act="disconnect" style="align-self:flex-start">Disconnect this phone</button></div>
+  ${clearWarn()}`;
+}
+
+function dbxPanel() {
+  if (!DB.isOn(S.dev)) return h`<div class="card pad stack" style="gap:10px"><h3>Dropbox</h3>
+    <div class="small muted" style="line-height:1.5">Keep a locked copy of your bills in your own Dropbox as well. It's saved a few seconds after every change, with a full snapshot each day kept for ${DB.KEEP_DAYS} days. If Chrome is cleared or the phone is replaced, sign in to Dropbox and everything comes back.</div>
+    <button class="btn" data-act="dbxconnect" style="align-self:flex-start">Connect Dropbox</button>
+    <div class="xs muted">The app can only see its own folder (Dropbox › Apps › Bills). It's locked with the family passphrase, like GitHub.</div></div>`;
+  const dx = S.dev.dbx;
+  return h`<div class="card pad stack" style="gap:10px"><div class="between"><h3>Dropbox</h3><span class="pill ${S.dbx === 'error' ? 'red' : 'green'}">${S.dbx === 'error' ? 'Problem' : S.dbx === 'syncing' ? 'Saving…' : 'On'}</span></div>
+    <div class="small" style="line-height:1.6">${dx.email ? h`<div><span class="muted">Account</span> ${dx.email}</div>` : ''}<div><span class="muted">Status</span> ${dbxLine()}</div><div><span class="muted">Last snapshot</span> ${dx.lastSnapDay ? C.fmtDate(dx.lastSnapDay, { year: true }) : 'later today'}</div></div>
+    <div class="grid2"><button class="btn small" data-act="dbxsync">Save to Dropbox now</button><button class="btn small sec" data-act="dbxsnap">Snapshot now</button></div>
+    <div class="grid2"><button class="btn small ghost" data-act="dbxlist">Restore a snapshot…</button><button class="btn small ghost" data-act="dbxoff">Disconnect</button></div>
+    <div class="xs muted" style="line-height:1.5">In Dropbox › Apps › Bills: <b>live</b> is the current copy and <b>snapshots</b> holds one a day (plus one before every restore) for ${DB.KEEP_DAYS} days. Each file opens with the family passphrase, and also works with <b>Restore from file</b>.</div></div>`;
+}
+function clearWarn() {
+  return h`<div class="banner amber small" style="line-height:1.5"><b>Clearing Chrome?</b> In <i>Delete browsing data</i>, untick <b>Cookies and site data</b>. That option deletes the bills on this phone. They'd still be in ${DB.isOn(S.dev) ? 'Dropbox' : ''}${DB.isOn(S.dev) && S.dev.github ? ' and ' : ''}${S.dev.github ? 'GitHub' : ''}${!DB.isOn(S.dev) && !S.dev.github ? 'a backup only if you’ve connected one' : ''}, but you'd need the passphrase to get them back.</div>`;
 }
 
 // ----- excel -----
@@ -760,9 +887,12 @@ function scrReports() {
 // ----- setup -----
 function scrSetup() {
   return h`<div class="stack" style="gap:6px;padding-top:12px"><h1>Bills</h1><div class="muted">Let's get your bills onto this phone.</div></div>
+  <div class="card pad stack" style="gap:10px;border:1.5px solid var(--brand)"><h3>Cleared Chrome, or a new phone?</h3><span class="small muted">Get your bills back from a copy you've saved before. You'll need the family passphrase.</span>
+    <button class="btn" data-act="dbxconnect">Get my bills from Dropbox</button>
+    <div class="grid2"><a class="btn sec" href="#/sync">From GitHub</a><button class="btn sec" data-act="restorefile">From a backup file</button></div></div>
+  <div class="eyebrow">Or start fresh</div>
   <button class="card pad stack" data-act="importfile" style="text-align:left;gap:6px;color:inherit"><h3>Import from your spreadsheet</h3><span class="small muted">Open the <b>bills-import.json</b> file that came with the app (made from tab 11).</span></button>
-  <a class="card pad stack" href="#/sync" style="gap:6px;color:inherit"><h3>Join the family copy</h3><span class="small muted">For Lyndsey's phone, or a new phone — use the setup code and passphrase.</span></a>
-  <button class="card pad stack" data-act="restorefile" style="text-align:left;gap:6px;color:inherit"><h3>Restore a backup file</h3><span class="small muted">A locked backup you saved earlier.</span></button>
+  <a class="card pad stack" href="#/sync" style="gap:6px;color:inherit"><h3>Join the family copy</h3><span class="small muted">For Lyndsey's phone — use the setup code from Shaun's phone and the passphrase.</span></a>
   <button class="card pad stack" data-act="startempty" style="text-align:left;gap:6px;color:inherit"><h3>Start empty</h3><span class="small muted">Add bills by hand.</span></button>`;
 }
 
@@ -956,21 +1086,45 @@ const A = {
   restorever: async (el) => {
     if (!(await confirmSheet('Restore the version from ' + el.dataset.when + '?', 'Both phones go back to how things were then. The current version stays in the history, so this can be undone.', 'Restore', true))) return;
     try {
-      const old = await St.loadVersion(S.dev, el.dataset.sha);
-      old.updatedAt = Date.now();
-      const bump = (o) => { if (o && typeof o === 'object') o.u = Date.now(); };
-      ['accounts', 'types', 'properties', 'bills', 'payments', 'people', 'others', 'payOverrides'].forEach((k) => (old[k] || []).forEach(bump));
-      // anything added since that version is marked deleted so the merge doesn't bring it back
-      ['accounts', 'types', 'properties', 'bills', 'payments', 'people', 'others', 'payOverrides'].forEach((k) => { const ids = new Set((old[k] || []).map((x) => x.id)); for (const x of S.doc[k] || []) if (!ids.has(x.id)) old[k].push({ ...x, del: true, u: Date.now() }); });
-      bump(old.settings);
-      old.transferChecks = old.transferChecks || {};
-      for (const k of Object.keys(old.transferChecks)) bump(old.transferChecks[k]);
-      for (const k of Object.keys(S.doc.transferChecks || {})) if (!old.transferChecks[k]) old.transferChecks[k] = { undone: true, u: Date.now(), by: who() };
-      S.doc = old;
-      await commit('Restored the version from ' + el.dataset.when, () => {});
-      await doSync(true);
+      if (DB.isOn(S.dev)) await DB.snapshot(S.doc, S.dev, saveDev, dbxClient(), 'before-restore').catch(() => {});
+      await replaceDoc(await St.loadVersion(S.dev, el.dataset.sha), 'Restored the version from ' + el.dataset.when);
     } catch (e) { toast(e.message, 5000); }
   },
+  dbxconnect: async () => {
+    if (!navigator.onLine) return toast("You're offline — connect Dropbox when you have internet");
+    await DB.startConnect(S.dev, saveDev);
+  },
+  dbxsync: () => doDbx(true),
+  dbxsnap: async () => {
+    try { await DB.snapshot(S.doc, S.dev, saveDev, dbxClient(), 'manual'); toast('Snapshot saved to Dropbox'); } catch (e) { toast(e.message, 5000); }
+  },
+  dbxlist: async () => {
+    const s = openSheet('<h2>Dropbox snapshots</h2><div class="small muted">Loading…</div>');
+    try {
+      const list = await DB.listSnapshots(dbxClient());
+      s.innerHTML = h`<h2>Dropbox snapshots</h2><div class="small muted">One a day for ${DB.KEEP_DAYS} days, plus one before every restore. Restoring puts both phones back to that copy; a snapshot of what's here now is saved first.</div>
+        <div class="list">${list.length ? list.map((x) => h`<div class="item" style="padding-left:0"><span class="grow stack" style="gap:2px"><span class="t" style="font-size:14px">${x.name.replace(/^bills-|\.enc\.json$/g, '').replace(/-(\d{2})(\d{2})-/, ' $1:$2 · ').replace(/-/g, ' ').replace(/^(\d{4}) (\d{2}) (\d{2})/, '$3/$2/$1')}</span><span class="s">${x.when ? 'Saved ' + new Date(x.when).toLocaleString('en-AU', { dateStyle: 'medium', timeStyle: 'short' }) : ''}</span></span><button class="btn small ghost" data-act="dbxrestore" data-path="${x.path}" data-name="${x.name}">Restore</button></div>`) : h`<div class="empty">No snapshots yet — the first is made today.</div>`}</div>
+        <button class="btn ghost" data-act="closesheet">Close</button>`.toString();
+    } catch (e) { s.innerHTML = h`<h2>Dropbox snapshots</h2><div class="banner red">${e.message}</div><button class="btn ghost" data-act="closesheet">Close</button>`.toString(); }
+  },
+  dbxrestore: async (el) => {
+    closeSheet();
+    if (!(await confirmSheet('Restore this Dropbox snapshot?', 'Both phones go back to the bills as they were in <b>' + el.dataset.name + '</b>. A snapshot of what\'s here now is saved to Dropbox first, so this can be undone.', 'Restore', true))) return;
+    try {
+      const cl = dbxClient();
+      const old = await DB.readSnapshot(cl, el.dataset.path, S.dev.passphrase);
+      if (S.doc) await DB.snapshot(S.doc, S.dev, saveDev, cl, 'before-restore');
+      if (!S.doc) { S.doc = St.joinDoc(); }
+      await replaceDoc(old, 'Restored Dropbox snapshot ' + el.dataset.name);
+      await doDbx();
+      toast('Restored from Dropbox');
+    } catch (e) { toast(e.message, 5000); }
+  },
+  dbxoff: async () => {
+    if (!(await confirmSheet('Disconnect Dropbox on this phone?', 'Your bills stay on this phone and in GitHub. The copy and snapshots already in Dropbox are kept.', 'Disconnect', true))) return;
+    S.dev.dbx = null; await saveDev(); S.dbx = 'off'; render();
+  },
+  closesheet: () => closeSheet(),
   dlbackup: async () => {
     if (!S.dev.passphrase) {
       const pass = prompt('Choose a passphrase to lock the backup file (write it down):');
@@ -1146,9 +1300,11 @@ const F = {
       await St.ghCheck(gh);
       S.dev = { ...S.dev, github: gh, passphrase: pass, name: name || S.dev.name };
       if (S.doc) { touch(S.doc.settings); }
-      const r = await St.sync(S.doc || St.emptyDoc(), S.dev, 'First backup');
+      const restoring = !S.doc;
+      const r = await St.sync(S.doc || St.joinDoc(), S.dev, restoring ? 'Restored on this phone' : 'First backup');
+      if (restoring && !C.liveBills(r.doc).length && !r.doc.people.length) { const fresh = St.emptyDoc(); fresh.trackedFrom = today(); r.doc = C.mergeDocs(r.doc, fresh); }
       S.doc = r.doc; await St.saveLocal(S.doc); await St.saveDevice(S.dev); S.sync = 'ok';
-      toast('Connected — your bills are backed up'); location.hash = '#/sync'; render();
+      toast(restoring && C.liveBills(S.doc).length ? 'Your bills are back — ' + C.liveBills(S.doc).length + ' bills from GitHub' : 'Connected — your bills are backed up', 5000); if (restoring) await askName(); location.hash = restoring && C.liveBills(S.doc).length ? '#/' : '#/sync'; render(); queueDbx(1000);
     } catch (e) { S.dev.github = null; toast(e.message, 6000); }
   },
   join: async (form) => {
@@ -1228,16 +1384,19 @@ document.addEventListener('input', (e) => {
   }
 });
 window.addEventListener('hashchange', onRoute);
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { render(); queueSync(300); } });
-window.addEventListener('online', () => queueSync(300));
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { render(); queueSync(300); queueDbx(800); } });
+window.addEventListener('online', () => { queueSync(300); queueDbx(800); });
 
 // ---------- start ----------
 async function start() {
   S.dev = await St.loadDevice();
   S.doc = await St.loadLocal();
+  const qp = new URLSearchParams(location.search);
+  if (qp.has('code') || qp.has('error')) { onRoute(); await dbxReturn(qp); }
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('./sw.js', { scope: './' }).catch(() => {});
   onRoute();
   if (S.dev.github) { S.sync = 'off'; doSync(); setInterval(() => { if (document.visibilityState === 'visible') doSync(); }, 5 * 60 * 1000); }
+  if (DB.isOn(S.dev)) { queueDbx(1500); setInterval(() => { if (document.visibilityState === 'visible') doDbx(); }, 10 * 60 * 1000); }
 }
 start();
