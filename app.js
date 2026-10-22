@@ -4,7 +4,7 @@ import * as St from './store.js';
 import { makeSetupCode, readSetupCode, unlock } from './crypto.js';
 import * as DB from './dropbox.js';
 
-const APP_VERSION = '1.1';
+const APP_VERSION = '1.2';
 import { h, raw, esc, icon, toast, openSheet, closeSheet, confirmSheet, download, pickFile, copyText } from './ui.js';
 
 const PALETTE = [['#2a78d6', 'Blue'], ['#eb6834', 'Orange'], ['#1baf7a', 'Aqua'], ['#eda100', 'Yellow'], ['#e87ba4', 'Pink'], ['#008300', 'Green'], ['#6250d6', 'Violet'], ['#e34948', 'Red'], ['#8A948D', 'Grey']];
@@ -179,7 +179,8 @@ function head(title, extra) {
 function weekendNote(b, due) { return C.isWeekend(due) && b.payMethod !== 'manual' ? ' · may come out ' + C.fmtDate(C.nextWeekday(due)) : ''; }
 function stateCell(i) {
   const b = i.bill;
-  if (i.state === 'paid') return h`<span class="pill green">Paid ✓</span>`;
+  if (i.state === 'paid') return C.paymentFor(doc(), b.id, i.due) ? h`<button class="pill green" data-act="payedit" data-bill="${b.id}" data-due="${i.due}" style="border:0">Paid ✓</button>` : h`<span class="pill green">Paid ✓</span>`;
+  if (i.state === 'scheduled') return h`<button class="pill blue" data-act="payedit" data-bill="${b.id}" data-due="${i.due}" style="border:0">Scheduled ${C.fmtDate(C.paymentFor(doc(), b.id, i.due).date, { dow: false })}</button>`;
   if (i.state === 'missed') return h`<span class="pill red">Didn’t come out</span>`;
   if (b.payMethod === 'manual') return h`<button class="tick ${''}" data-act="pay" data-bill="${b.id}" data-due="${i.due}" aria-label="Mark ${b.name} paid">${icon('check', 18, 2.4)}</button>`;
   if (b.payMethod === 'rent') return h`<span class="pill grey">From rent</span>`;
@@ -189,7 +190,7 @@ function billRow(i, opts = {}) {
   const b = i.bill;
   const acc = b.accountId ? C.accountName(doc(), b.accountId) : (b.payMethod === 'rent' ? 'Taken from rent' : '');
   const sub = opts.sub || [acc, b.freq].filter(Boolean).join(' · ') + weekendNote(b, i.due);
-  return h`<div class="item ${i.state === 'paid' ? 'done' : ''}">${dotFor(b)}<a class="grow stack" style="gap:2px;color:inherit" href="#/bill/${b.id}"><span class="t">${b.name}</span><span class="s">${sub}</span></a><span class="stack" style="gap:4px;align-items:flex-end"><span class="amt">${amt(b, i.amount)}</span>${opts.noState ? '' : stateCell(i)}</span></div>`;
+  return h`<div class="item ${C.settled(i.state) ? 'done' : ''}">${dotFor(b)}<a class="grow stack" style="gap:2px;color:inherit" href="#/bill/${b.id}"><span class="t">${b.name}</span><span class="s">${sub}</span></a><span class="stack" style="gap:4px;align-items:flex-end"><span class="amt">${amt(b, i.amount)}</span>${opts.noState ? '' : stateCell(i)}</span></div>`;
 }
 function relPill(n) {
   const cls = n < 0 ? 'red' : n <= 3 ? 'red' : n <= 7 ? 'amber' : 'blue';
@@ -435,10 +436,11 @@ function scrBill(id) {
   ${b.status !== 'active' ? h`<div class="banner ${b.status === 'stopped' ? 'red' : 'amber'}">${b.status === 'stopped' ? 'Stopped on ' + C.fmtDate(b.stoppedAt, { year: true }) + '. No more reminders; history kept.' : 'Not started yet — no reminders until you add the details and switch it on.'}</div>` : ''}
   <div class="card pad stack" style="gap:14px">
     <div class="between" style="align-items:flex-start"><span class="stack" style="gap:2px"><span class="mono" style="font-size:32px;font-weight:600">${amt(b, a)}</span><span class="small muted">${b.freq || '—'}${a !== null && b.freq ? ' · about ' + C.money(a * C.PER_YEAR[b.freq] / 12) + ' a month' : ''}${b.amountMode === 'percentPay' ? ' · ' + b.percent + '% of ' + (byIdName(d.people, b.personId) || 'pay') + '’s ' + (b.percentBase === 'takeHome' ? 'take-home' : 'gross') + ' pay' : ''}</span></span>
-      ${nd ? (st === 'paid' ? h`<span class="pill green">Paid</span>` : relPill(C.daysBetween(t, nd))) : ''}</div>
+      ${nd ? (st === 'paid' ? h`<span class="pill green">Paid</span>` : st === 'scheduled' ? h`<span class="pill blue">Scheduled</span>` : relPill(C.daysBetween(t, nd))) : ''}</div>
     <div class="grid2"><div class="stack" style="gap:2px"><span class="xs muted">Next due</span><b>${nd ? C.fmtDate(nd, { year: true }) : '—'}</b>${nd && weekendNote(b, nd) ? h`<span class="xs muted">${weekendNote(b, nd).slice(3)}</span>` : ''}</div><div class="stack" style="gap:2px"><span class="xs muted">Paid from</span><b>${b.accountId ? C.accountName(d, b.accountId) : '—'}</b></div></div>
     ${overdue.length ? h`<button class="btn" data-act="pay" data-bill="${b.id}" data-due="${overdue[overdue.length - 1]}">Mark the ${C.fmtDate(overdue[overdue.length - 1], { dow: false })} payment as paid</button>`
-      : b.payMethod === 'manual' && nd && st !== 'paid' ? h`<button class="btn" data-act="pay" data-bill="${b.id}" data-due="${nd}">Mark ${C.fmtDate(nd, { dow: false })} as paid</button>` : ''}
+      : b.payMethod === 'manual' && nd && !C.settled(st) ? h`<button class="btn" data-act="pay" data-bill="${b.id}" data-due="${nd}">Mark ${C.fmtDate(nd, { dow: false })} as paid</button>` : ''}
+    ${nd && C.paymentFor(d, b.id, nd) && C.settled(st) ? h`<button class="btn ghost small" data-act="payedit" data-bill="${b.id}" data-due="${nd}">${payLine(b, nd, st)} · Change</button>` : ''}
     ${recentDD ? h`<button class="btn ghost small" data-act="missed" data-bill="${b.id}" data-due="${recentDD}">${C.payState(d, b, recentDD, t) === 'missed' ? 'Undo “didn’t come out” for ' : 'The ' }${C.fmtDate(recentDD, { dow: false })}${C.payState(d, b, recentDD, t) === 'missed' ? '' : ' debit didn’t come out'}</button>` : ''}
   </div>
   ${fu ? h`<div class="banner ${fu.p === 1 ? 'red' : 'amber'}"><b>${fu.p === 1 ? 'Needs attention' : 'To check'}:</b> ${fu.text}</div>` : ''}
@@ -457,10 +459,20 @@ function scrBill(id) {
     ${b.endDate ? detailRow('Ends on', C.fmtDate(b.endDate, { year: true })) : ''}${b.expectedChange ? detailRow('Expected change', b.expectedChange) : ''}
     ${detailRow('Reminders', b.remind === false ? 'Off' : 'On')}${b.dueText ? detailRow('Spreadsheet due date(s)', b.dueText) : ''}
     ${b.notes ? h`<div class="stack" style="gap:4px;padding:12px 0"><span class="muted" style="font-size:15px">Notes</span><span>${b.notes}</span></div>` : ''}</div>
-  ${past.length ? h`<div class="stack" style="gap:6px"><h3 style="padding:0 2px">Recent payments</h3><div class="card list">${past.map((dd) => { const s = C.payState(d, b, dd, t); const p = C.paymentFor(d, b.id, dd); return h`<div class="item"><span class="grow stack" style="gap:2px"><span class="t" style="font-size:14px">${C.fmtDate(dd, { year: true })}</span><span class="s">${s === 'paid' ? (p ? 'Ticked by ' + (p.by || '') : dd < (d.trackedFrom || '') ? 'Before the app' : 'Direct debit') : s === 'missed' ? 'Didn’t come out' : 'Not paid yet'}</span></span><span class="amt">${amt(b, C.amountOn(b, dd, d))}</span>${b.payMethod === 'manual' ? h`<button class="tick ${s === 'paid' ? 'on' : ''}" data-act="pay" data-bill="${b.id}" data-due="${dd}" aria-label="Paid">${icon('check', 18, 2.4)}</button>` : ''}</div>`; })}</div></div>` : ''}
+  ${past.length ? h`<div class="stack" style="gap:6px"><div class="between" style="padding:0 2px"><h3>Recent payments</h3><span class="xs muted">Tap one to change it</span></div><div class="card list">${past.map((dd) => { const s = C.payState(d, b, dd, t); return h`<div class="item"><button class="grow stack" data-act="payedit" data-bill="${b.id}" data-due="${dd}" style="gap:2px;text-align:left;background:none;border:0;padding:0;color:inherit;font:inherit"><span class="t" style="font-size:14px">${C.fmtDate(dd, { year: true })}</span><span class="s">${payLine(b, dd, s)}</span></button><span class="amt">${amt(b, payAmount(b, dd))}</span>${b.payMethod === 'manual' ? h`<button class="tick ${C.settled(s) ? 'on' : ''}" data-act="pay" data-bill="${b.id}" data-due="${dd}" aria-label="Paid">${icon('check', 18, 2.4)}</button>` : ''}</div>`; })}</div></div>` : C.isISO(b.startDate) && b.status === 'active' ? h`<div class="card pad small muted">No payments yet${nd ? ' — first payment due ' + C.fmtDate(nd, { year: true }) : ''}.</div>` : ''}
   <div class="grid2 no-print"><a class="btn ghost" href="#/edit/${b.id}">Edit</a>${b.status === 'stopped' ? h`<button class="btn sec" data-act="restart" data-bill="${b.id}">Restart</button>` : h`<button class="btn danger" data-act="stop" data-bill="${b.id}">Stop this bill</button>`}</div>
   <button class="btn ghost small no-print" data-act="delete" data-bill="${b.id}" style="align-self:center">Delete permanently</button>`;
 }
+// One line describing a payment: when it was paid, by whom, early/late.
+function payLine(b, due, s) {
+  const d = doc(), p = C.paymentFor(d, b.id, due);
+  if (s === 'missed') return 'Didn’t come out';
+  if (s === 'scheduled') return 'Scheduled · ' + C.fmtDate(p.date);
+  if (s === 'paid' && p) { const tm = C.paidTiming(p, due); return 'Paid ' + C.fmtDate(p.date, { dow: false }) + (tm && tm !== 'on the day' ? ' · ' + tm : '') + (p.by ? ' · ' + p.by : '') + (p.note ? ' · ' + p.note : ''); }
+  if (s === 'paid') return due < (d.trackedFrom || '') || (b.addedOn && due < b.addedOn) ? 'Before the app' : b.payMethod === 'manual' ? 'Paid' : 'Direct debit';
+  return s === 'overdue' ? 'Not paid yet' : 'Due';
+}
+function payAmount(b, due) { const p = C.paymentFor(doc(), b.id, due); return p && p.status === 'paid' && typeof p.amount === 'number' ? p.amount : C.amountOn(b, due, doc()); }
 function detailRow(k, v) { return h`<div class="between" style="padding:12px 0;border-bottom:1px solid var(--line2);font-size:15px"><span class="muted">${k}</span><span style="font-weight:500;text-align:right">${v}</span></div>`; }
 
 // ----- add / edit -----
@@ -502,6 +514,7 @@ function scrEdit(id) {
     <div class="stack" style="gap:8px"><span class="field" style="gap:0">How often</span><div class="grid3" data-radio>${C.FREQS.map((f) => radio('freq', f, f, b.freq))}</div></div>
     <div class="grid2"><label class="field">Any one due date<input type="date" name="refDate" value="${b.refDate || ''}"><span class="hint">Past or upcoming — the app rolls it forward.</span></label>
       <label class="field">Ends on (optional)<input type="date" name="endDate" value="${b.endDate || ''}"><span class="hint">Loan or contract end — stops itself.</span></label></div>
+    ${isNew || C.isISO(b.startDate) ? h`<label class="field">Started<input type="date" name="startDate" value="${b.startDate || t}"><span class="hint">No payments before this date. Paying it a while already? Set an earlier date — those payments show as already paid.</span></label>` : ''}
     <label class="switch"><span class="stack" style="gap:2px"><b style="font-size:15px">Not started yet</b><span class="small muted">No reminders or totals until you switch this off</span></span><input type="checkbox" name="pending" ${b.status === 'pending' ? 'checked' : ''}></label>
   </div>
   <div class="card pad stack-lg">
@@ -569,6 +582,8 @@ async function saveBillForm(form) {
   b.freq = fd.get('freq');
   b.refDate = fd.get('refDate') || null;
   b.endDate = fd.get('endDate') || null;
+  if (form.querySelector('[name=startDate]')) b.startDate = C.isISO(fd.get('startDate')) ? fd.get('startDate') : (old ? old.startDate || null : t);
+  if (!old) b.addedOn = t;
   const pending = fd.get('pending') === 'on';
   if (pending) b.status = 'pending'; else if (b.status === 'pending') b.status = 'active';
   b.payMethod = fd.get('payMethod') || 'dd';
@@ -964,7 +979,29 @@ const A = {
     if (ex && ex.status !== 'missed') { await commit('Un-ticked ' + b.name + ' (' + C.fmtDate(due, { dow: false }) + ')', (dd) => { touch(ex); ex.del = true; }); return; }
     const a = C.amountOn(b, due, d);
     await commit('Paid ' + b.name + ' ' + C.money(a) + ' (due ' + C.fmtDate(due, { dow: false }) + ')', (dd) => { if (ex) { touch(ex); ex.del = true; } dd.payments.push(touch({ id: C.uid('pm'), billId: b.id, due, date: today(), amount: a, status: 'paid' })); });
-    toast('Marked paid');
+    toast('Marked paid today', 6000, h`<button class="btn small sec" data-act="payedit" data-bill="${b.id}" data-due="${due}" style="margin-left:12px">Change</button>`.toString());
+  },
+  payedit: (el) => {
+    const d = doc(), b = C.byId(d.bills, el.dataset.bill), due = el.dataset.due, t = today();
+    const p = C.paymentFor(d, b.id, due), s = C.payState(d, b, due, t);
+    const rec = p && p.status !== 'missed' ? p : null;
+    const tEl = document.querySelector('.toast'); if (tEl) tEl.hidden = true;
+    const auto = b.payMethod !== 'manual';
+    const defDate = rec && C.isISO(rec.date) ? rec.date : C.settled(s) || auto ? due : t;
+    openSheet(h`<h2>Payment — ${b.name}</h2><div class="small muted">Due ${C.fmtDate(due, { year: true })} · ${auto ? 'direct debit' : 'you pay it'}</div>
+      <form data-form="payedit" data-bill="${b.id}" data-due="${due}" class="stack-lg">
+        <label class="field">Paid on<input type="date" name="date" value="${defDate}" required><span class="hint">A date still to come means it's scheduled (e.g. a BPAY set up for Friday) — reminders stop.</span></label>
+        <label class="field">Amount paid ($)<input class="money" type="number" step="0.01" inputmode="decimal" name="amount" value="${rec && typeof rec.amount === 'number' ? rec.amount : C.amountOn(b, due, d) ?? ''}"><span class="hint">Change it for a part payment or a late fee. Reports use what was paid.</span></label>
+        <label class="field">Note (optional)<input name="note" value="${(rec && rec.note) || ''}" placeholder="e.g. BPAY receipt 12345"></label>
+        <button class="btn" type="submit">Save</button>
+        ${rec ? h`<button class="btn ghost danger" type="button" data-act="payremove" data-bill="${b.id}" data-due="${due}">${auto ? 'Reset to automatic' : 'Remove payment (not paid)'}</button>` : ''}
+      </form>`.toString());
+  },
+  payremove: async (el) => {
+    const d = doc(), b = C.byId(d.bills, el.dataset.bill), due = el.dataset.due, ex = C.paymentFor(d, b.id, due);
+    closeSheet(); if (!ex) return;
+    await commit('Removed the ' + b.name + ' payment for ' + C.fmtDate(due, { dow: false }), () => { touch(ex); ex.del = true; });
+    toast(b.payMethod === 'manual' ? 'Marked not paid' : 'Back to automatic');
   },
   missed: async (el) => {
     const d = doc(), b = C.byId(d.bills, el.dataset.bill), due = el.dataset.due;
@@ -1184,6 +1221,20 @@ async function askName(force) {
 
 // ---------- forms ----------
 const F = {
+  payedit: async (form) => {
+    const d = doc(), b = C.byId(d.bills, form.dataset.bill), due = form.dataset.due, fd = new FormData(form);
+    const date = fd.get('date'), amount = fd.get('amount') === '' ? null : Number(fd.get('amount')), note = (fd.get('note') || '').trim();
+    if (!C.isISO(date)) return toast('Pick the date it was paid');
+    if (amount !== null && !(amount >= 0)) return toast('Check the amount');
+    const ex = C.paymentFor(d, b.id, due), rec = ex && ex.status !== 'missed' ? ex : null;
+    const was = rec && rec.date && rec.date !== date ? ' (was ' + C.fmtDate(rec.date, { dow: false }) + ')' : '';
+    closeSheet();
+    await commit((rec ? 'Changed ' : 'Recorded ') + b.name + ' payment: ' + (date > today() ? 'scheduled ' : 'paid ') + C.fmtDate(date, { dow: false }) + was + (amount !== null ? ' · ' + C.money(amount) : ''), (dd) => {
+      if (rec) { Object.assign(rec, { date, amount: amount ?? C.amountOn(b, due, dd), note }); touch(rec); }
+      else { if (ex) { touch(ex); ex.del = true; } dd.payments.push(touch({ id: C.uid('pm'), billId: b.id, due, date, amount: amount ?? C.amountOn(b, due, dd), note, status: 'paid' })); }
+    });
+    toast(date > today() ? 'Scheduled for ' + C.fmtDate(date) : 'Payment saved');
+  },
   bill: (form) => saveBillForm(form),
   review: async (form) => {
     const fd = new FormData(form), b = C.byId(doc().bills, form.dataset.id), date = fd.get('date') || today();
@@ -1393,6 +1444,7 @@ async function start() {
   S.doc = await St.loadLocal();
   const qp = new URLSearchParams(location.search);
   if (qp.has('code') || qp.has('error')) { onRoute(); await dbxReturn(qp); }
+  if (S.doc) { const fixed = C.fixNewBillStarts(S.doc, tz()); if (fixed.length) { fixed.forEach((b) => { b.u = Date.now(); }); S.doc.updatedAt = Date.now(); S.doc.activity = S.doc.activity || []; S.doc.activity.unshift({ id: C.uid('ac'), at: Date.now(), u: Date.now(), by: S.dev.name || 'Me', text: 'Removed the made-up history before ' + fixed.map((b) => b.name + ' was added (' + C.fmtDate(b.startDate, { dow: false }) + ')').join(', ') }); await St.saveLocal(S.doc); } }
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('./sw.js', { scope: './' }).catch(() => {});
   onRoute();

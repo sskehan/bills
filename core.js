@@ -179,13 +179,17 @@ export function group(bill) {
 export function paymentFor(doc, billId, due) {
   return (doc.payments || []).find((p) => !p.del && p.billId === billId && p.due === due) || null;
 }
-// 'paid' | 'due' (today or later, not paid) | 'overdue' (manual, past, unpaid) | 'missed' (debit flagged as not coming out)
+// 'paid' | 'scheduled' (ticked with a paid date still to come) | 'due' (today or later, not paid)
+// | 'overdue' (manual, past, unpaid) | 'missed' (debit flagged as not coming out)
 export function payState(doc, bill, due, today) {
   const p = paymentFor(doc, bill.id, due);
   if (p && p.status === 'missed') return 'missed';
+  if (p && isISO(p.date) && today && p.date > today) return 'scheduled';
   if (p) return 'paid';
   const tracked = doc.trackedFrom || '0000-01-01';
   if (due < tracked) return 'paid';
+  // a bill added with an earlier "Started" date: dates before it was added count as already paid
+  if (isISO(bill.addedOn) && due < bill.addedOn) return 'paid';
   if (bill.payMethod === 'manual') return due < today ? 'overdue' : 'due';
   return due < today ? 'paid' : 'due';
 }
@@ -219,12 +223,39 @@ export function schedule(doc, from, to, today, filter = () => true) {
   for (const b of liveBills(doc)) {
     if (!filter(b)) continue;
     for (const d of occurrences(b, from, to)) {
-      const amt = amountOn(b, d, doc);
+      const p = paymentFor(doc, b.id, d);
+      const amt = p && p.status === 'paid' && typeof p.amount === 'number' ? p.amount : amountOn(b, d, doc); // what was actually paid, once recorded
       out.push({ bill: b, due: d, amount: amt, state: payState(doc, b, d, today), group: group(b) });
     }
   }
   out.sort((a, b) => (a.due < b.due ? -1 : a.due > b.due ? 1 : a.bill.name.localeCompare(b.bill.name)));
   return out;
+}
+export const settled = (state) => state === 'paid' || state === 'scheduled';
+// How a recorded payment's date compares with the due date.
+export function paidTiming(p, due) {
+  if (!p || !isISO(p.date)) return '';
+  const n = daysBetween(due, p.date);
+  return n === 0 ? 'on the day' : n > 0 ? n + ' day' + (n === 1 ? '' : 's') + ' late' : 'paid early';
+}
+// Bills added in the app before start dates existed: their id holds the moment
+// they were created, so give them that day as their start (imported bills are left alone).
+export function createdFromId(id, tz = 'Australia/Sydney') {
+  const m = /^b_([0-9a-z]{8})/.exec(id || '');
+  if (!m) return null;
+  const ts = parseInt(m[1], 36);
+  if (!(ts > Date.UTC(2026, 0, 1) && ts < Date.UTC(2100, 0, 1))) return null;
+  return todayISO(new Date(ts), tz);
+}
+export function fixNewBillStarts(doc, tz) {
+  const fixed = [];
+  for (const b of doc.bills || []) {
+    if (b.del || isISO(b.startDate) || isISO(b.addedOn)) continue;
+    const made = createdFromId(b.id, tz);
+    if (!made || (doc.trackedFrom && made < doc.trackedFrom)) continue;
+    b.startDate = made; b.addedOn = made; fixed.push(b);
+  }
+  return fixed;
 }
 export function sumAmounts(items) { return round2(items.reduce((a, i) => a + (i.amount || 0), 0)); }
 
@@ -272,7 +303,7 @@ export function followUps(doc, today) {
       if (past.length) { p = 1; t.push('Not paid yet — was due ' + fmtDate(past[past.length - 1])); }
     }
     // Already paid early? Then the "due soon" warnings for that date don't apply.
-    const ndPaid = nd ? payState(doc, b, nd, today) === 'paid' : false;
+    const ndPaid = nd ? settled(payState(doc, b, nd, today)) : false;
     if (nd && !ndPaid && b.freq === 'Every 5 yrs' && days <= 90) { p = Math.min(p, 1); t.push('Renewal due ' + fmtDate(nd, { year: true }) + ' — renew'); }
     if (nd && !ndPaid && LUMP.has(b.freq) && days <= 14) { p = Math.min(p, 1); t.push(money(amt, 0) + ' lump sum due in ' + days + ' day(s)' + (b.payMethod === 'manual' ? ' — pay it yourself' : b.accountId ? ' — check funds in ' + accountName(doc, b.accountId) : '')); }
     if (nd && rv.status !== 'na' && (b.freq === 'Annual' || b.freq === 'Every 5 yrs') && days <= 45 && !reviewCurrentStrict(b, today)) { p = Math.min(p, 1); t.push('Renews in ' + days + ' days — review & compare before it renews'); }

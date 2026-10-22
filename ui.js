@@ -48,10 +48,11 @@ export function icon(name, size = 22, sw = 2) {
 }
 
 let toastTimer;
-export function toast(msg, ms = 2600) {
+// actionHtml (optional): an already-escaped button shown after the message.
+export function toast(msg, ms = 2600, actionHtml = '') {
   let el = document.querySelector('.toast');
   if (!el) { el = document.createElement('div'); el.className = 'toast'; el.setAttribute('role', 'status'); document.body.appendChild(el); }
-  el.textContent = msg; el.hidden = false;
+  el.textContent = msg; if (actionHtml) { el.insertAdjacentHTML('beforeend', actionHtml); el.style.display = 'flex'; el.style.alignItems = 'center'; } else el.style.display = ''; el.hidden = false;
   clearTimeout(toastTimer); toastTimer = setTimeout(() => { el.hidden = true; }, ms);
 }
 
