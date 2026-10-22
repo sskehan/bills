@@ -4,7 +4,7 @@ import * as St from './store.js';
 import { makeSetupCode, readSetupCode, unlock } from './crypto.js';
 import * as DB from './dropbox.js';
 
-const APP_VERSION = '1.2';
+const APP_VERSION = '1.2.1';
 import { h, raw, esc, icon, toast, openSheet, closeSheet, confirmSheet, download, pickFile, copyText } from './ui.js';
 
 const PALETTE = [['#2a78d6', 'Blue'], ['#eb6834', 'Orange'], ['#1baf7a', 'Aqua'], ['#eda100', 'Yellow'], ['#e87ba4', 'Pink'], ['#008300', 'Green'], ['#6250d6', 'Violet'], ['#e34948', 'Red'], ['#8A948D', 'Grey']];
@@ -510,9 +510,9 @@ function scrEdit(id) {
       <label class="field">The amount is<select name="amountMode">${opt('fixed', 'Fixed', b.amountMode)}${opt('usually', 'Usually fixed (estimate)', b.amountMode)}${opt('varies', 'Varies — use last amount', b.amountMode)}${opt('percentPay', 'A % of pay', b.amountMode)}</select></label></div>
     <div class="grid3" data-show="amountMode=percentPay"><label class="field">% of pay<input name="percent" type="number" step="0.01" min="0" value="${b.percent ?? 1}"></label><label class="field">Whose pay<select name="personId">${people.map((p) => opt(p.id, p.name, b.personId))}</select></label><label class="field">Based on<select name="percentBase">${opt('gross', 'Gross', b.percentBase)}${opt('takeHome', 'Take-home', b.percentBase)}</select></label></div>
     <span class="xs muted" data-show="amountMode=percentPay">The amount above is used until that pay is entered on the Pay screen.</span>
-    ${!isNew ? h`<label class="field">If you've changed the amount, it starts from<input type="date" name="amountFrom" value="${nd || t}"><span class="hint">Earlier payments keep the old amount, and it shows in the price history.</span></label>` : ''}
+    ${!isNew ? h`<label class="field" id="amtfrom" hidden>New amount starts from<input type="date" name="amountFrom" value="${nd || t}"><span class="hint">Only for the price change. Earlier payments keep the old amount, and it shows in the price history. To move the bill's date, change <b>Due date</b> below.</span></label>` : ''}
     <div class="stack" style="gap:8px"><span class="field" style="gap:0">How often</span><div class="grid3" data-radio>${C.FREQS.map((f) => radio('freq', f, f, b.freq))}</div></div>
-    <div class="grid2"><label class="field">Any one due date<input type="date" name="refDate" value="${b.refDate || ''}"><span class="hint">Past or upcoming — the app rolls it forward.</span></label>
+    <div class="grid2"><label class="field">Due date<input type="date" name="refDate" value="${b.refDate || ''}"><span class="hint">Any one due date, past or upcoming — the app works out the rest.</span></label>
       <label class="field">Ends on (optional)<input type="date" name="endDate" value="${b.endDate || ''}"><span class="hint">Loan or contract end — stops itself.</span></label></div>
     ${isNew || C.isISO(b.startDate) ? h`<label class="field">Started<input type="date" name="startDate" value="${b.startDate || t}"><span class="hint">No payments before this date. Paying it a while already? Set an earlier date — those payments show as already paid.</span></label>` : ''}
     <label class="switch"><span class="stack" style="gap:2px"><b style="font-size:15px">Not started yet</b><span class="small muted">No reminders or totals until you switch this off</span></span><input type="checkbox" name="pending" ${b.status === 'pending' ? 'checked' : ''}></label>
@@ -1431,6 +1431,7 @@ document.addEventListener('input', (e) => {
   if (e.target.dataset.input === 'q') { S.ui.q = e.target.value; render(); }
   if (e.target.name === 'amount' && e.target.dataset.cur !== undefined) {
     const p = document.getElementById('amtprev'); const cur = Number(e.target.dataset.cur), v = Number(e.target.value);
+    const af = document.getElementById('amtfrom'); if (af) af.hidden = e.target.value === '' || Number(e.target.value) === cur;
     if (p && e.target.value !== '' && cur) p.textContent = (v >= cur ? 'Up ' : 'Down ') + C.money(Math.abs(v - cur)) + ' (' + (v >= cur ? '+' : '−') + Math.abs((v - cur) / cur * 100).toFixed(1) + '%) on ' + C.money(cur) + '.';
   }
 });
