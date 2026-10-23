@@ -3,11 +3,11 @@
 // Dates are plain 'YYYY-MM-DD' strings and all date maths is done in UTC
 // so daylight saving never shifts a due date.
 
-export const FREQS = ['Weekly', 'Fortnightly', 'Monthly', 'Quarterly', 'Annual', 'Every 5 yrs'];
+export const FREQS = ['Weekly', 'Fortnightly', 'Monthly', 'Quarterly', 'Annual', 'Every 5 yrs', 'One-off'];
 export const PER_YEAR = { Weekly: 52, Fortnightly: 26, Monthly: 12, Quarterly: 4, Annual: 1, 'Every 5 yrs': 0.2 };
 const DAY_STEP = { Weekly: 7, Fortnightly: 14 };
 const MONTH_STEP = { Monthly: 1, Quarterly: 3, Annual: 12, 'Every 5 yrs': 60 };
-export const LUMP = new Set(['Quarterly', 'Annual', 'Every 5 yrs']);
+export const LUMP = new Set(['Quarterly', 'Annual', 'Every 5 yrs', 'One-off']);
 const DAY = 86400000;
 
 // ---------- dates ----------
@@ -84,6 +84,7 @@ export function occurrences(bill, from, to) {
   // A 5-yearly date (e.g. a licence expiry) is the next one — don't project backwards.
   if (bill.freq === 'Every 5 yrs' && ref > start) start = ref;
   if (end < start) return out;
+  if (bill.freq === 'One-off') { if (ref >= start && ref <= end) out.push(ref); return out; } // a single date, never repeated
   if (DAY_STEP[bill.freq]) {
     const n = DAY_STEP[bill.freq];
     const k = Math.ceil(daysBetween(ref, start) / n);
@@ -232,6 +233,12 @@ export function schedule(doc, from, to, today, filter = () => true) {
   return out;
 }
 export const settled = (state) => state === 'paid' || state === 'scheduled';
+export const isOneOff = (bill) => bill && bill.freq === 'One-off';
+// A one-off bill is done once it's paid (ticked, or a direct debit whose date has passed).
+export function oneOffDone(doc, bill, today) {
+  if (!isOneOff(bill) || !isISO(bill.refDate) || bill.status !== 'active') return false;
+  return settled(payState(doc, bill, bill.refDate, today));
+}
 // How a recorded payment's date compares with the due date.
 export function paidTiming(p, due) {
   if (!p || !isISO(p.date)) return '';
@@ -290,6 +297,7 @@ export function followUps(doc, today) {
   const out = [];
   for (const b of liveBills(doc)) {
     if (b.status === 'stopped') continue;
+    if (oneOffDone(doc, b, today)) continue;
     const name = b.name;
     if (b.status === 'pending') { out.push({ bill: b, p: 3, text: 'Not started yet — add the details when known' }); continue; }
     const nd = nextDue(b, today);

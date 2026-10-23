@@ -4,7 +4,7 @@ import * as St from './store.js';
 import { makeSetupCode, readSetupCode, unlock } from './crypto.js';
 import * as DB from './dropbox.js';
 
-const APP_VERSION = '1.2.1';
+const APP_VERSION = '1.3';
 import { h, raw, esc, icon, toast, openSheet, closeSheet, confirmSheet, download, pickFile, copyText } from './ui.js';
 
 const PALETTE = [['#2a78d6', 'Blue'], ['#eb6834', 'Orange'], ['#1baf7a', 'Aqua'], ['#eda100', 'Yellow'], ['#e87ba4', 'Pink'], ['#008300', 'Green'], ['#6250d6', 'Violet'], ['#e34948', 'Red'], ['#8A948D', 'Grey']];
@@ -42,7 +42,7 @@ async function doSync(manual) {
     if (rev !== startRev) { S.doc = C.mergeDocs(r.doc, S.doc); queueSync(1000); } else S.doc = r.doc;
     await St.saveLocal(S.doc); await St.saveDevice(S.dev);
     S.sync = 'ok'; S.syncErr = '';
-    if (St.canon(S.doc) !== before) { render(); queueDbx(1000); } else renderStatusOnly();
+    if (St.canon(S.doc) !== before) { if (!editing()) render(); else renderStatusOnly(); queueDbx(1000); } else renderStatusOnly();
     if (manual) toast(r.status === 'pushed' ? 'Saved to GitHub' : 'Up to date');
   } catch (e) { S.sync = 'error'; S.syncErr = e.message; renderStatusOnly(); if (manual) toast(e.message, 5000); }
   finally { syncing = false; }
@@ -64,7 +64,7 @@ async function doDbx(manual) {
     if (rev !== startRev) { S.doc = C.mergeDocs(r.doc, S.doc); queueDbx(1000); } else S.doc = r.doc;
     await St.saveLocal(S.doc);
     S.dbx = 'ok'; S.dbxErr = '';
-    if (St.canon(S.doc) !== before) { render(); queueSync(1000); } else renderStatusOnly();
+    if (St.canon(S.doc) !== before) { if (!editing()) render(); else renderStatusOnly(); queueSync(1000); } else renderStatusOnly();
     DB.maybeSnapshot(S.doc, S.dev, saveDev, cl).catch(() => {});
     if (manual) toast(r.status === 'pushed' ? 'Saved to Dropbox' : 'Dropbox is up to date');
   } catch (e) {
@@ -165,6 +165,44 @@ function clampStamps(d) {
   fix(d.settings); Object.values(d.transferChecks || {}).forEach(fix);
   if (d.updatedAt > now) d.updatedAt = now;
   return d;
+}
+
+// ---------- unsaved bill drafts (kept on this phone only, until saved or discarded) ----------
+const DRAFTS = new Map();
+const draftKey = (id) => 'bills-draft:' + (id || 'new');
+const editing = () => S.route.split('/')[0] === 'edit';
+function getDraft(id) {
+  const k = draftKey(id);
+  if (DRAFTS.has(k)) return DRAFTS.get(k);
+  try { const j = localStorage.getItem(k); return j ? JSON.parse(j) : null; } catch { return null; }
+}
+function clearDraft(id) { const k = draftKey(id); DRAFTS.delete(k); try { localStorage.removeItem(k); } catch {} }
+function saveDraft(form) {
+  const vals = {};
+  for (const el of form.elements) {
+    if (!el.name) continue;
+    if (el.type === 'radio') { if (el.checked) vals[el.name] = el.value; }
+    else if (el.type === 'checkbox') vals[el.name] = el.checked;
+    else vals[el.name] = el.value;
+  }
+  const incl = form.querySelector('[name=includeInTotals]');
+  const dr = { at: Date.now(), vals, inclAuto: incl ? incl.dataset.inclAuto : null };
+  const k = draftKey(form.dataset.id);
+  DRAFTS.set(k, dr);
+  try { localStorage.setItem(k, JSON.stringify(dr)); } catch {}
+}
+function applyDraft(form, dr) {
+  const v = dr.vals || {};
+  for (const el of form.elements) {
+    if (!el.name || !(el.name in v)) { if (el.type === 'radio' && el.name in v) el.checked = false; continue; }
+    if (el.type === 'radio') el.checked = v[el.name] === el.value;
+    else if (el.type === 'checkbox') el.checked = !!v[el.name];
+    else el.value = v[el.name];
+  }
+  const incl = form.querySelector('[name=includeInTotals]');
+  if (incl && dr.inclAuto) incl.dataset.inclAuto = dr.inclAuto;
+  const amt = form.querySelector('[name=amount]'), af = document.getElementById('amtfrom');
+  if (amt && af && amt.dataset.cur !== undefined) af.hidden = amt.value === '' || Number(amt.value) === Number(amt.dataset.cur);
 }
 
 // ---------- small builders ----------
@@ -326,17 +364,19 @@ function scrBills() {
     return h`<div class="card ${cls}" style="overflow:hidden"><button class="item" data-act="toggle" data-k="${key}" aria-expanded="${!!open}" style="min-height:58px">${color ? h`<span class="dot lg" style="background:${color}"></span>` : ''}<span class="grow stack" style="gap:2px"><span style="font-size:16px;font-weight:600">${title}</span><span class="s">${sub || list.length + ' bill' + (list.length > 1 ? 's' : '') + ' · ' + C.money(ann / 12, 0) + ' a month'}</span></span><span class="mono small">${C.money(ann, 0)}/yr</span>${icon(open ? 'up' : 'down', 18)}</button>
     ${open ? h`<div class="list" style="border-top:1px solid var(--line2)">${list.map((b) => registerRow(b))}</div>` : ''}</div>`;
   };
-  const hhCounted = active.filter((b) => C.inTotals(b));
+  const oneOffs = active.filter((b) => C.isOneOff(b));
+  const oneOffDone = oneOffs.filter((b) => C.oneOffDone(d, b, t)), oneOffOpen = oneOffs.filter((b) => !C.oneOffDone(d, b, t));
+  const hhCounted = active.filter((b) => C.inTotals(b) && !C.isOneOff(b));
   for (const ty of types) {
     const list = hhCounted.filter((b) => b.typeId === ty.id);
     sections.push(groupCard('t:' + ty.id, ty.name, ty.color, list));
   }
   const untyped = hhCounted.filter((b) => !C.byId(d.types, b.typeId));
   sections.push(groupCard('t:none', 'No type', '#8A948D', untyped));
-  const notCounted = active.filter((b) => b.kind === 'household' && !C.inTotals(b));
-  const invest = active.filter((b) => b.kind === 'investment' && !C.inTotals(b));
+  const notCounted = active.filter((b) => b.kind === 'household' && !C.inTotals(b) && !C.isOneOff(b));
+  const invest = active.filter((b) => b.kind === 'investment' && !C.inTotals(b) && !C.isOneOff(b));
   const props = (d.properties || []).filter((p) => !p.del);
-  const reminders = active.filter((b) => b.kind === 'reminder');
+  const reminders = active.filter((b) => b.kind === 'reminder' && !C.isOneOff(b));
   const pending = live.filter((b) => b.status === 'pending');
   const stopped = live.filter((b) => b.status === 'stopped');
   const pc = (d.settings.payCheckPending || []).length;
@@ -351,6 +391,8 @@ function scrBills() {
     ${props.map((p) => groupCard('p:' + p.id, p.name, '#6250d6', invest.filter((b) => b.propertyId === p.id), null, 'inv'))}
     ${groupCard('p:none', 'Across the portfolio', '#6250d6', invest.filter((b) => !C.byId(d.properties, b.propertyId)), null, 'inv')}` : ''}
   ${reminders.length ? h`<div class="eyebrow">Reminders only · paying for others</div>${(d.others || []).filter((o) => !o.del).map((o) => groupCard('o:' + o.id, o.name, '#8A948D', reminders.filter((b) => b.forWhom === o.id), null, 'dashed'))}${groupCard('o:none', 'Others', '#8A948D', reminders.filter((b) => !C.byId(d.others, b.forWhom)), null, 'dashed')}` : ''}
+  ${oneOffOpen.length ? h`<div class="eyebrow">One-off bills</div>${groupCard('oo', 'One-off bills — coming up', '#8A948D', oneOffOpen, oneOffOpen.length + ' · paid once, not in the yearly figures above')}` : ''}
+  ${oneOffDone.length ? h`${!oneOffOpen.length ? h`<div class="eyebrow">One-off bills</div>` : ''}${groupCard('ood', 'One-off bills — done', '#8A948D', oneOffDone, oneOffDone.length + ' · paid · kept for reports', 'dashed')}` : ''}
   ${pending.length ? h`<div class="eyebrow">Not started yet</div>${groupCard('pending', 'Waiting for details', '#8A948D', pending, pending.length + ' · no reminders until you add the details')}` : ''}
   ${stopped.length ? h`<div class="eyebrow">Stopped</div>${groupCard('stopped', 'Stopped bills', '#8A948D', stopped, stopped.length + ' · history kept · restore any time')}` : h`<div class="card dashed pad between"><span class="stack" style="gap:2px"><b>Stopped bills</b><span class="small muted">Cancelled or switched bills keep their history here.</span></span><span class="mono muted">0</span></div>`}`;
 }
@@ -361,7 +403,7 @@ function registerRow(b) {
   const missing = b.status === 'active' && (a === null || !nd);
   const sub = b.status === 'pending' ? (b.notes || 'Not started yet') : a === null ? 'Amount not set' : (C.isEstimate(b) ? '≈' : '') + C.money(a) + ' · ' + (b.freq || '—') + (b.status === 'stopped' ? ' · stopped ' + C.fmtDate(b.stoppedAt, { year: true }) : '');
   return h`<a class="item" href="#/bill/${b.id}"><span class="grow stack" style="gap:2px"><span class="t">${b.name}</span><span class="s">${sub}</span></span>
-  ${missing ? h`<span class="pill amber">Needs details</span>` : nd && b.status === 'active' ? h`<span class="stack" style="gap:2px;align-items:flex-end"><span class="xs muted">Next</span><span class="small" style="font-weight:500">${C.fmtDate(nd, { dow: false, today: t })}</span></span>` : ''}</a>`;
+  ${C.oneOffDone(d, b, t) ? h`<span class="pill green">Paid</span>` : C.isOneOff(b) && !nd && b.status === 'active' ? h`<span class="pill red">Not paid</span>` : missing && !C.isOneOff(b) ? h`<span class="pill amber">Needs details</span>` : nd && b.status === 'active' ? h`<span class="stack" style="gap:2px;align-items:flex-end"><span class="xs muted">Next</span><span class="small" style="font-weight:500">${C.fmtDate(nd, { dow: false, today: t })}</span></span>` : ''}</a>`;
 }
 
 function scrReviews() {
@@ -435,14 +477,15 @@ function scrBill(id) {
   return h`${back('#/bills', b.name, kindLabel)}
   ${b.status !== 'active' ? h`<div class="banner ${b.status === 'stopped' ? 'red' : 'amber'}">${b.status === 'stopped' ? 'Stopped on ' + C.fmtDate(b.stoppedAt, { year: true }) + '. No more reminders; history kept.' : 'Not started yet — no reminders until you add the details and switch it on.'}</div>` : ''}
   <div class="card pad stack" style="gap:14px">
-    <div class="between" style="align-items:flex-start"><span class="stack" style="gap:2px"><span class="mono" style="font-size:32px;font-weight:600">${amt(b, a)}</span><span class="small muted">${b.freq || '—'}${a !== null && b.freq ? ' · about ' + C.money(a * C.PER_YEAR[b.freq] / 12) + ' a month' : ''}${b.amountMode === 'percentPay' ? ' · ' + b.percent + '% of ' + (byIdName(d.people, b.personId) || 'pay') + '’s ' + (b.percentBase === 'takeHome' ? 'take-home' : 'gross') + ' pay' : ''}</span></span>
+    <div class="between" style="align-items:flex-start"><span class="stack" style="gap:2px"><span class="mono" style="font-size:32px;font-weight:600">${amt(b, a)}</span><span class="small muted">${b.freq || '—'}${C.isOneOff(b) ? (b.refDate ? ' · due ' + C.fmtDate(b.refDate, { year: true }) : '') : a !== null && C.PER_YEAR[b.freq] ? ' · about ' + C.money(a * C.PER_YEAR[b.freq] / 12) + ' a month' : ''}${b.amountMode === 'percentPay' ? ' · ' + b.percent + '% of ' + (byIdName(d.people, b.personId) || 'pay') + '’s ' + (b.percentBase === 'takeHome' ? 'take-home' : 'gross') + ' pay' : ''}</span></span>
       ${nd ? (st === 'paid' ? h`<span class="pill green">Paid</span>` : st === 'scheduled' ? h`<span class="pill blue">Scheduled</span>` : relPill(C.daysBetween(t, nd))) : ''}</div>
-    <div class="grid2"><div class="stack" style="gap:2px"><span class="xs muted">Next due</span><b>${nd ? C.fmtDate(nd, { year: true }) : '—'}</b>${nd && weekendNote(b, nd) ? h`<span class="xs muted">${weekendNote(b, nd).slice(3)}</span>` : ''}</div><div class="stack" style="gap:2px"><span class="xs muted">Paid from</span><b>${b.accountId ? C.accountName(d, b.accountId) : '—'}</b></div></div>
+    <div class="grid2"><div class="stack" style="gap:2px"><span class="xs muted">${C.isOneOff(b) ? 'Due' : 'Next due'}</span><b>${nd ? C.fmtDate(nd, { year: true }) : C.isOneOff(b) && b.refDate ? C.fmtDate(b.refDate, { year: true }) : '—'}</b>${nd && weekendNote(b, nd) ? h`<span class="xs muted">${weekendNote(b, nd).slice(3)}</span>` : ''}</div><div class="stack" style="gap:2px"><span class="xs muted">Paid from</span><b>${b.accountId ? C.accountName(d, b.accountId) : '—'}</b></div></div>
     ${overdue.length ? h`<button class="btn" data-act="pay" data-bill="${b.id}" data-due="${overdue[overdue.length - 1]}">Mark the ${C.fmtDate(overdue[overdue.length - 1], { dow: false })} payment as paid</button>`
       : b.payMethod === 'manual' && nd && !C.settled(st) ? h`<button class="btn" data-act="pay" data-bill="${b.id}" data-due="${nd}">Mark ${C.fmtDate(nd, { dow: false })} as paid</button>` : ''}
     ${nd && C.paymentFor(d, b.id, nd) && C.settled(st) ? h`<button class="btn ghost small" data-act="payedit" data-bill="${b.id}" data-due="${nd}">${payLine(b, nd, st)} · Change</button>` : ''}
     ${recentDD ? h`<button class="btn ghost small" data-act="missed" data-bill="${b.id}" data-due="${recentDD}">${C.payState(d, b, recentDD, t) === 'missed' ? 'Undo “didn’t come out” for ' : 'The ' }${C.fmtDate(recentDD, { dow: false })}${C.payState(d, b, recentDD, t) === 'missed' ? '' : ' debit didn’t come out'}</button>` : ''}
   </div>
+  ${C.oneOffDone(d, b, t) ? h`<div class="banner green">This one-off bill is done — no more reminders. It stays in reports and history.</div>` : ''}
   ${fu ? h`<div class="banner ${fu.p === 1 ? 'red' : 'amber'}"><b>${fu.p === 1 ? 'Needs attention' : 'To check'}:</b> ${fu.text}</div>` : ''}
   ${(b.todos || []).filter((x) => !x.del).length ? h`<div class="card list">${b.todos.filter((x) => !x.del).map((td) => h`<div class="item"><button class="tick ${td.done ? 'on' : ''}" data-act="todo" data-bill="${b.id}" data-id="${td.id}" aria-label="Done">${icon('check', 18, 2.4)}</button><span class="grow t" style="${td.done ? 'text-decoration:line-through;color:#7A848D' : ''}">${td.text}</span></div>`)}</div>` : ''}
   ${b.review && b.review.applicable ? h`<div class="card pad stack" style="gap:12px"><div class="between"><h3>Review</h3><span class="pill ${rv.status === 'ok' ? 'green' : rv.status === 'soon' ? 'amber' : 'red'}">${rv.label}</span></div>
@@ -494,6 +537,7 @@ function scrEdit(id) {
   const inclDefault = typeof b.includeInTotals === 'boolean' ? b.includeInTotals : C.inTotals(b);
   return h`${back(isNew ? '#/bills' : '#/bill/' + b.id, isNew ? 'Add a bill' : 'Edit bill')}
   <form data-form="bill" data-id="${isNew ? '' : b.id}" class="stack-lg" novalidate>
+  ${(() => { const dr = getDraft(isNew ? '' : b.id); return dr ? h`<div class="banner amber small row" style="justify-content:space-between;gap:10px"><span>Unfinished ${isNew ? 'bill' : 'changes'} from ${new Date(dr.at).toLocaleString('en-AU', { weekday: 'short', hour: 'numeric', minute: '2-digit' })} — keep going, or</span><button type="button" class="btn small ghost" data-act="draftdiscard" data-id="${isNew ? '' : b.id}">Discard</button></div>` : ''; })()}
   <div id="formerr"></div>
   <div class="card pad stack-lg">
     <label class="field">Bill name<input name="name" value="${b.name || ''}" required autocomplete="off"></label>
@@ -506,15 +550,15 @@ function scrEdit(id) {
     <label class="switch" data-show="kind=household,investment"><span class="stack" style="gap:2px"><b style="font-size:15px">Count in household totals</b><span class="small muted">Upcoming, Calendar, Pay and reports</span></span><input type="checkbox" name="includeInTotals" ${inclDefault ? 'checked' : ''} data-incl-auto="${typeof b.includeInTotals === 'boolean' ? '0' : '1'}"></label>
   </div>
   <div class="card pad stack-lg">
-    <div class="grid2"><label class="field">Amount ($)<input class="money" name="amount" type="number" inputmode="decimal" step="0.01" min="0" value="${curAmt}" placeholder="0.00"></label>
+    <div class="grid2"><label class="field">Amount ($)<input class="money" name="amount" type="number" inputmode="decimal" step="0.01" min="0" value="${curAmt}" placeholder="0.00" ${!isNew ? h`data-cur="${curAmt}"` : ''}></label>
       <label class="field">The amount is<select name="amountMode">${opt('fixed', 'Fixed', b.amountMode)}${opt('usually', 'Usually fixed (estimate)', b.amountMode)}${opt('varies', 'Varies — use last amount', b.amountMode)}${opt('percentPay', 'A % of pay', b.amountMode)}</select></label></div>
     <div class="grid3" data-show="amountMode=percentPay"><label class="field">% of pay<input name="percent" type="number" step="0.01" min="0" value="${b.percent ?? 1}"></label><label class="field">Whose pay<select name="personId">${people.map((p) => opt(p.id, p.name, b.personId))}</select></label><label class="field">Based on<select name="percentBase">${opt('gross', 'Gross', b.percentBase)}${opt('takeHome', 'Take-home', b.percentBase)}</select></label></div>
     <span class="xs muted" data-show="amountMode=percentPay">The amount above is used until that pay is entered on the Pay screen.</span>
     ${!isNew ? h`<label class="field" id="amtfrom" hidden>New amount starts from<input type="date" name="amountFrom" value="${nd || t}"><span class="hint">Only for the price change. Earlier payments keep the old amount, and it shows in the price history. To move the bill's date, change <b>Due date</b> below.</span></label>` : ''}
     <div class="stack" style="gap:8px"><span class="field" style="gap:0">How often</span><div class="grid3" data-radio>${C.FREQS.map((f) => radio('freq', f, f, b.freq))}</div></div>
-    <div class="grid2"><label class="field">Due date<input type="date" name="refDate" value="${b.refDate || ''}"><span class="hint">Any one due date, past or upcoming — the app works out the rest.</span></label>
-      <label class="field">Ends on (optional)<input type="date" name="endDate" value="${b.endDate || ''}"><span class="hint">Loan or contract end — stops itself.</span></label></div>
-    ${isNew || C.isISO(b.startDate) ? h`<label class="field">Started<input type="date" name="startDate" value="${b.startDate || t}"><span class="hint">No payments before this date. Paying it a while already? Set an earlier date — those payments show as already paid.</span></label>` : ''}
+    <div class="grid2"><label class="field">Due date<input type="date" name="refDate" value="${b.refDate || ''}"><span class="hint" data-show="freq!=One-off">Any one due date, past or upcoming — the app works out the rest.</span><span class="hint" data-show="freq=One-off">The date it's due. It's paid once and not repeated.</span></label>
+      <label class="field" data-show="freq!=One-off">Ends on (optional)<input type="date" name="endDate" value="${b.endDate || ''}"><span class="hint">Loan or contract end — stops itself.</span></label></div>
+    ${isNew || C.isISO(b.startDate) ? h`<label class="field" data-show="freq!=One-off">Started<input type="date" name="startDate" value="${b.startDate || t}"><span class="hint">No payments before this date. Paying it a while already? Set an earlier date — those payments show as already paid.</span></label>` : ''}
     <label class="switch"><span class="stack" style="gap:2px"><b style="font-size:15px">Not started yet</b><span class="small muted">No reminders or totals until you switch this off</span></span><input type="checkbox" name="pending" ${b.status === 'pending' ? 'checked' : ''}></label>
   </div>
   <div class="card pad stack-lg">
@@ -526,7 +570,7 @@ function scrEdit(id) {
   </div>
   <div class="card pad stack-lg">
     <div class="grid2"><label class="field">Provider<input name="provider" value="${b.provider || ''}"></label><label class="field">Policy / account #<input name="accountNo" value="${b.accountNo || ''}" autocomplete="off"></label></div>
-    <label class="switch"><span class="stack" style="gap:2px"><b style="font-size:15px">Review this bill yearly</b><span class="small muted">Check you're still on the best deal</span></span><input type="checkbox" name="reviewApplicable" ${b.review && b.review.applicable ? 'checked' : ''}></label>
+    <label class="switch" data-show="freq!=One-off"><span class="stack" style="gap:2px"><b style="font-size:15px">Review this bill yearly</b><span class="small muted">Check you're still on the best deal</span></span><input type="checkbox" name="reviewApplicable" ${b.review && b.review.applicable ? 'checked' : ''}></label>
     <label class="field" data-show="reviewApplicable=on">Last reviewed<input type="date" name="reviewLast" max="${t}" value="${(b.review && b.review.last) || ''}"></label>
     <label class="field">Expected change (optional)<input name="expectedChange" value="${b.expectedChange || ''}" placeholder="e.g. new amount at house handover"></label>
     <label class="field">Notes<textarea name="notes">${b.notes || ''}</textarea></label>
@@ -539,9 +583,11 @@ function updateShows(form) {
   if (!form) return;
   const fd = new FormData(form);
   form.querySelectorAll('[data-show]').forEach((el) => {
-    const [k, vals] = el.dataset.show.split('=');
+    const neg = el.dataset.show.includes('!=');
+    const [k, vals] = el.dataset.show.split(neg ? '!=' : '=');
     const v = fd.get(k) ?? '';
-    el.hidden = !vals.split(',').includes(String(v));
+    const hit = vals.split(',').includes(String(v));
+    el.hidden = neg ? hit : !hit;
   });
   form.querySelectorAll('[data-radio] label').forEach((l) => { const i = l.querySelector('input'); l.setAttribute('aria-pressed', i.checked ? 'true' : 'false'); });
   const incl = form.querySelector('[name=includeInTotals]');
@@ -582,8 +628,9 @@ async function saveBillForm(form) {
   b.freq = fd.get('freq');
   b.refDate = fd.get('refDate') || null;
   b.endDate = fd.get('endDate') || null;
-  if (form.querySelector('[name=startDate]')) b.startDate = C.isISO(fd.get('startDate')) ? fd.get('startDate') : (old ? old.startDate || null : t);
-  if (!old) b.addedOn = t;
+  if (b.freq === 'One-off') { b.endDate = null; b.startDate = null; if (!old) b.addedOn = null; }
+  else if (form.querySelector('[name=startDate]')) b.startDate = C.isISO(fd.get('startDate')) ? fd.get('startDate') : (old ? old.startDate || null : t);
+  if (!old && b.freq !== 'One-off') b.addedOn = t;
   const pending = fd.get('pending') === 'on';
   if (pending) b.status = 'pending'; else if (b.status === 'pending') b.status = 'active';
   b.payMethod = fd.get('payMethod') || 'dd';
@@ -609,6 +656,7 @@ async function saveBillForm(form) {
     if (old) dd.bills = dd.bills.map((x) => (x.id === b.id ? b : x)); else dd.bills.push(b);
     if (old && old.payMethod !== b.payMethod) dd.settings.payCheckPending = (dd.settings.payCheckPending || []).filter((x) => x !== b.id);
   });
+  clearDraft(id);
   location.hash = '#/bill/' + b.id;
   toast(old ? 'Saved' : 'Bill added');
 }
@@ -956,7 +1004,7 @@ function render() {
   }
   document.getElementById('tabs').innerHTML = noTabs ? '' : TABS.map(([href, label, ic]) => h`<a href="${href}" ${tab === href || (href === '#/bills' && ['bill', 'edit'].includes(S.route.split('/')[0])) || (href === '#/settings' && ['pay', 'transfers', 'accounts', 'types', 'properties', 'others', 'checkpay', 'alerts', 'sync', 'excel', 'activity'].includes(S.route.split('/')[0])) ? raw('aria-current="page"') : ''}>${icon(ic)}${label}</a>`).join('');
   document.getElementById('tabs').hidden = noTabs;
-  app.querySelectorAll('form[data-form="bill"]').forEach(updateShows);
+  app.querySelectorAll('form[data-form="bill"]').forEach((f) => { const dr = getDraft(f.dataset.id); if (dr) applyDraft(f, dr); updateShows(f); });
   if (keepScroll) window.scrollTo(0, y); else window.scrollTo(0, 0);
   if (active) { const el = app.querySelector(`[data-input="${active}"]`); if (el) { el.focus(); const v = el.value; if (el.setSelectionRange && el.type !== 'date') try { el.setSelectionRange(v.length, v.length); } catch {} } }
   lastRoute = S.route;
@@ -1162,6 +1210,10 @@ const A = {
     S.dev.dbx = null; await saveDev(); S.dbx = 'off'; render();
   },
   closesheet: () => closeSheet(),
+  draftdiscard: async (el) => {
+    if (!(await confirmSheet('Discard what you typed?', 'The ' + (el.dataset.id ? 'bill goes back to how it was saved' : 'unfinished bill is cleared') + '.', 'Discard', true))) return;
+    clearDraft(el.dataset.id); lastRoute = null; render();
+  },
   dlbackup: async () => {
     if (!S.dev.passphrase) {
       const pass = prompt('Choose a passphrase to lock the backup file (write it down):');
@@ -1395,7 +1447,7 @@ function registerCSV() {
   const d = doc(), t = today();
   const sheetCat = (b) => b.kind === 'investment' ? 'Properties' : b.typeId === 't_home' ? 'Properties' : b.typeId === 't_kids' ? 'Children' : (C.typeOf(d, b) || {}).name || 'Other';
   const rows = [['Category', 'Bill Name', 'Amount ($)', 'Frequency', 'Due Date(s)', 'Provider / Company', 'Policy / Account #', 'Account Paid From', 'Review Applicable?', 'Last Reviewed', 'Reference Date', 'Notes']];
-  for (const b of C.liveBills(d).filter((x) => x.kind !== 'reminder' && x.status !== 'stopped')) {
+  for (const b of C.liveBills(d).filter((x) => x.kind !== 'reminder' && x.status !== 'stopped' && !C.isOneOff(x))) {
     const a = C.amountOn(b, C.nextDue(b, t) || t, d);
     rows.push([sheetCat(b), b.name, a ?? '', b.freq || '', b.dueText || '', b.provider || '', b.accountNo || '', b.accountId ? C.accountName(d, b.accountId) : '', b.review && b.review.applicable ? 'YES' : 'NO', (b.review && b.review.last) || '', b.refDate || '', b.notes || '']);
   }
@@ -1422,12 +1474,18 @@ document.addEventListener('submit', (e) => {
 document.addEventListener('change', (e) => {
   if (e.target.name === 'includeInTotals') e.target.dataset.inclAuto = '0';
   const form = e.target.closest('form[data-form="bill"]');
-  if (form) updateShows(form);
+  if (form) {
+    if (e.target.name === 'payMethod') form.dataset.payTouched = '1';
+    // a new one-off bill is usually paid by hand
+    if (e.target.name === 'freq' && e.target.value === 'One-off' && !form.dataset.id && !form.dataset.payTouched) { const m = form.querySelector('input[name=payMethod][value=manual]'); if (m) m.checked = true; }
+    updateShows(form); saveDraft(form);
+  }
   if (e.target.matches('[data-autosave]')) { const f = e.target.closest('form[data-form]'); F[f.dataset.form](f); }
   if (e.target.matches('[data-rinv]')) A.rinv(e.target);
   if (e.target.dataset.input === 'rFrom' || e.target.dataset.input === 'rTo') { S.ui[e.target.dataset.input] = e.target.value; render(); }
 });
 document.addEventListener('input', (e) => {
+  const bf = e.target.closest && e.target.closest('form[data-form="bill"]'); if (bf) saveDraft(bf);
   if (e.target.dataset.input === 'q') { S.ui.q = e.target.value; render(); }
   if (e.target.name === 'amount' && e.target.dataset.cur !== undefined) {
     const p = document.getElementById('amtprev'); const cur = Number(e.target.dataset.cur), v = Number(e.target.value);
@@ -1436,7 +1494,7 @@ document.addEventListener('input', (e) => {
   }
 });
 window.addEventListener('hashchange', onRoute);
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { render(); queueSync(300); queueDbx(800); } });
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { if (!editing()) render(); queueSync(300); queueDbx(800); } });
 window.addEventListener('online', () => { queueSync(300); queueDbx(800); });
 
 // ---------- start ----------
