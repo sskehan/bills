@@ -1,1513 +1,1288 @@
-// Bills — the phone app. Screens are rebuilt from the saved data on every change.
-import * as C from './core.js';
-import * as St from './store.js';
-import { makeSetupCode, readSetupCode, unlock } from './crypto.js';
-import * as DB from './dropbox.js';
+/* MyMint — screens, coin records, search & filters, Numista lookups, albums, wants, reports. */
+"use strict";
 
-const APP_VERSION = '1.3';
-import { h, raw, esc, icon, toast, openSheet, closeSheet, confirmSheet, download, pickFile, copyText } from './ui.js';
+/* ================= state ================= */
+const S={coins:[],wanted:[],settings:[],receipts:[],meta:{},urls:{},tab:"coins",q:"",f:{},stack:[],moreView:null,readOnly:false};
+const FDEF={grp:[],denom:"",coll:"",series:"",yFrom:"",yTo:"",mint:"",grade:"",finish:"",pack:"",colour:"",how:"",storage:"",photos:"",status:"owned",todo:false,dupes:false,sets:false};
+S.f=clone(FDEF);
+const view=()=>S.meta.view||(S.meta.view={mode:"grid",size:"m",sort:"year-desc",group:"denom"});
 
-const PALETTE = [['#2a78d6', 'Blue'], ['#eb6834', 'Orange'], ['#1baf7a', 'Aqua'], ['#eda100', 'Yellow'], ['#e87ba4', 'Pink'], ['#008300', 'Green'], ['#6250d6', 'Violet'], ['#e34948', 'Red'], ['#8A948D', 'Grey']];
-const S = { doc: null, dev: null, route: '', params: [], ui: { range: 7, open: {}, q: '', rKind: 'fy', rInv: false, rTable: false, rSel: null, calSel: null, calMonth: null }, sync: 'off', syncErr: '', dbx: 'off', dbxErr: '' };
-const $app = () => document.getElementById('app');
-const tz = () => (S.doc && S.doc.settings && S.doc.settings.timezone) || 'Australia/Sydney';
-const today = () => C.todayISO(new Date(), tz());
-const who = () => S.dev.name || 'Me';
-const doc = () => S.doc;
+/* ================= reference lists ================= */
+const DENOMS=[
+  {k:"$10",face:"$10",grp:"big",metal:"silver"},{k:"$5",face:"$5",grp:"big",metal:"silver"},
+  {k:"$2",face:"$2",grp:"two",metal:"gold"},{k:"$1",face:"$1",grp:"one",metal:"gold"},
+  {k:"50c",face:"50c",grp:"fifty",metal:"silver",shape:"dodeca"},{k:"20c",face:"20c",grp:"twenty",metal:"silver"},
+  {k:"10c",face:"10c",grp:"small",metal:"silver"},{k:"5c",face:"5c",grp:"small",metal:"silver"},
+  {k:"2c",face:"2c",grp:"bronze",metal:"copper"},{k:"1c",face:"1c",grp:"bronze",metal:"copper"},
+  {k:"Crown",face:"5/-",grp:"pre",metal:"silver"},{k:"Florin",face:"2/-",grp:"pre",metal:"silver"},{k:"Shilling",face:"1/-",grp:"pre",metal:"silver"},
+  {k:"Sixpence",face:"6d",grp:"pre",metal:"silver"},{k:"Threepence",face:"3d",grp:"pre",metal:"silver"},{k:"Penny",face:"1d",grp:"pre",metal:"copper"},{k:"Halfpenny",face:"½d",grp:"pre",metal:"copper"},
+  {k:"Other",face:"?",grp:"other",metal:"silver"}];
+const GROUPS={
+  big:{label:"$5 & up",solid:"#DB2777",tint:"#FCE7F3",text:"#9D174D",badge:"$5+"},
+  two:{label:"$2 coins",solid:"#D97706",tint:"#FFF4DB",text:"#92400E",badge:"$2"},
+  one:{label:"$1 coins",solid:"#65A30D",tint:"#ECFCCB",text:"#3F6212",badge:"$1"},
+  fifty:{label:"50 cents",solid:"#0D9488",tint:"#DDF5F2",text:"#115E59",badge:"50"},
+  twenty:{label:"20 cents",solid:"#7C3AED",tint:"#EDE9FE",text:"#5B21B6",badge:"20"},
+  small:{label:"10c & 5c",solid:"#0284C7",tint:"#E0F2FE",text:"#075985",badge:"10"},
+  bronze:{label:"2c & 1c",solid:"#B45309",tint:"#FDECD8",text:"#7C2D12",badge:"1c"},
+  pre:{label:"Pre-decimal",solid:"#E8553B",tint:"#FFE8E1",text:"#9A3412",badge:"d"},
+  other:{label:"Other",solid:"#475569",tint:"#E2E8F0",text:"#1E293B",badge:"?"}};
+const GRP_ORDER=["big","two","one","fifty","twenty","small","bronze","pre","other"];
+const GRADES=["G","VG","F","VF","EF","aUNC","UNC","BU"];
+const GRADE_NAMES={G:"Good",VG:"Very Good",F:"Fine",VF:"Very Fine",EF:"Extremely Fine",aUNC:"About Uncirculated",UNC:"Uncirculated",BU:"Brilliant Uncirculated"};
+const GRADE_HINTS={G:"Good (4–6): heavily worn, design mostly flat, date readable.",VG:"Very Good (8–10): central detail worn flat, rims full.",F:"Fine (12–15): about half the detail worn, lettering sharp.",VF:"Very Fine (20–35): light to moderate wear, major features clear.",EF:"Extremely Fine (40–45): only the high points lightly worn.",aUNC:"About Uncirculated (50–58): trace of rub on the highest points.",UNC:"Uncirculated (60–70): no wear at all.",BU:"Brilliant Uncirculated: no wear, full original lustre."};
+const FINISHES=["Circulating","Uncirculated","Frosted uncirculated","Proof","Specimen"];
+const PACKS=["Loose","Card","RAM card","DCPL card","Set / folder","Box / case","Tin","Roll / tube","Capsule","Flip","2x2 holder","Slab","Album"];
+const PACK_OTHER="Other…";
+const HOWS=["Bought","Noodled","Gift","Swapped","Inherited"];
+const STATUSES=["In collection","Sold","Traded"];
+const SIDES=["Obverse","Reverse","Card / packaging","Edge","Slab label","Certificate","Other"];
+const SOURCES=["Numista","Royal Australian Mint","Perth Mint","Dealer","Other"];
+const COLLS=["Decimal","Pre-decimal","World"];
+const MINTS=["None","C","S","M","P","B","A","Privy mark"];
 
-// ---------- saving ----------
-let syncTimer = null;
-let rev = 0, syncing = false;
-async function commit(text, fn) {
-  rev++;
-  fn(S.doc);
-  S.doc.updatedAt = Date.now();
-  if (text) { S.doc.activity = S.doc.activity || []; S.doc.activity.unshift({ id: C.uid('ac'), at: Date.now(), u: Date.now(), by: who(), text }); S.doc.activity = S.doc.activity.slice(0, 400); }
-  await St.saveLocal(S.doc);
-  render();
-  queueSync();
-  queueDbx();
-}
-function touch(o) { o.u = Date.now(); o.by = who(); return o; }
-function queueSync(ms = 2500) { if (!S.dev.github) return; clearTimeout(syncTimer); syncTimer = setTimeout(doSync, ms); }
-async function doSync(manual) {
-  if (!S.dev.github || !S.dev.passphrase || !navigator.onLine) { if (manual && !navigator.onLine) toast('No internet — will sync when you\'re back online'); return; }
-  if (syncing) { queueSync(1500); return; }
-  syncing = true;
-  S.sync = 'syncing'; renderStatusOnly();
-  try {
-    const before = St.canon(S.doc), startRev = rev;
-    const r = await St.sync(S.doc, S.dev, 'Update');
-    // Changes made while syncing win over the copy that was being synced.
-    if (rev !== startRev) { S.doc = C.mergeDocs(r.doc, S.doc); queueSync(1000); } else S.doc = r.doc;
-    await St.saveLocal(S.doc); await St.saveDevice(S.dev);
-    S.sync = 'ok'; S.syncErr = '';
-    if (St.canon(S.doc) !== before) { if (!editing()) render(); else renderStatusOnly(); queueDbx(1000); } else renderStatusOnly();
-    if (manual) toast(r.status === 'pushed' ? 'Saved to GitHub' : 'Up to date');
-  } catch (e) { S.sync = 'error'; S.syncErr = e.message; renderStatusOnly(); if (manual) toast(e.message, 5000); }
-  finally { syncing = false; }
-}
-// ---------- Dropbox (an extra locked copy, plus daily snapshots) ----------
-let dbxTimer = null, dbxBusy = false, dbxRetry = null;
-const saveDev = () => St.saveDevice(S.dev);
-const dbxClient = () => DB.client(S.dev, saveDev);
-function queueDbx(ms = 4000) { if (!DB.isOn(S.dev) || !S.doc) return; clearTimeout(dbxTimer); dbxTimer = setTimeout(doDbx, ms); }
-async function doDbx(manual) {
-  if (!DB.isOn(S.dev) || !S.doc) return;
-  if (!S.dev.passphrase) { S.dbx = 'error'; S.dbxErr = 'Enter the family passphrase (Sharing & backup) so the Dropbox copy can be locked.'; renderStatusOnly(); return; }
-  if (!navigator.onLine) { if (manual) toast("You're offline — it will go to Dropbox when you're back online"); return; }
-  if (dbxBusy) { queueDbx(1500); return; }
-  dbxBusy = true; S.dbx = 'syncing'; renderStatusOnly();
-  try {
-    const cl = dbxClient(), before = St.canon(S.doc), startRev = rev;
-    const r = await DB.syncDoc(S.doc, S.dev, saveDev, cl);
-    if (rev !== startRev) { S.doc = C.mergeDocs(r.doc, S.doc); queueDbx(1000); } else S.doc = r.doc;
-    await St.saveLocal(S.doc);
-    S.dbx = 'ok'; S.dbxErr = '';
-    if (St.canon(S.doc) !== before) { if (!editing()) render(); else renderStatusOnly(); queueSync(1000); } else renderStatusOnly();
-    DB.maybeSnapshot(S.doc, S.dev, saveDev, cl).catch(() => {});
-    if (manual) toast(r.status === 'pushed' ? 'Saved to Dropbox' : 'Dropbox is up to date');
-  } catch (e) {
-    S.dbx = 'error'; S.dbxErr = (!navigator.onLine || e instanceof TypeError) ? "Couldn't reach Dropbox — it will try again shortly." : e.message;
-    if (S.dev.dbx) { S.dev.dbx.error = S.dbxErr; await saveDev(); }
-    renderStatusOnly(); if (manual) toast(S.dbxErr, 5000);
-    clearTimeout(dbxRetry); if (DB.isOn(S.dev)) dbxRetry = setTimeout(doDbx, 120000);
-  } finally { dbxBusy = false; if (S.route === 'sync') render(); }
-}
-function dbxLine() {
-  if (!DB.isOn(S.dev)) return 'Not connected';
-  if (S.dbx === 'syncing') return 'Saving to Dropbox…';
-  if (S.dbx === 'error') return 'Problem: ' + S.dbxErr;
-  const last = S.dev.dbx.lastSync;
-  return 'In Dropbox ✓' + (last ? ' · ' + new Date(last).toLocaleString('en-AU', { dateStyle: 'medium', timeStyle: 'short' }) : '');
-}
-// Ask for the family passphrase. With a locked copy to test against, keeps asking until it opens it.
-async function askPassphrase(env, why) {
-  for (let i = 0; i < 3; i++) {
-    const p = prompt(why || 'Family passphrase:');
-    if (!p) return null;
-    if (!env) return p;
-    try { const d = await unlock(env, p); return { pass: p, doc: d }; } catch { toast("That passphrase didn't open it — try again", 3500); }
+const dInfo=k=>DENOMS.find(d=>d.k===k)||DENOMS[DENOMS.length-1];
+const grpOf=c=>c.denom?dInfo(c.denom).grp:"other";
+const themeOf=c=>GROUPS[grpOf(c)];
+const isOwned=c=>!["Sold","Traded"].includes(c.status);
+const qtyOf=c=>Math.max(1,+c.qty||1);
+const setSize=c=>c.isSet?((c.setItems||[]).length||Math.max(1,parseInt(c.setCount,10)||1)):1;
+const coinsIn=c=>qtyOf(c)*setSize(c);
+const collOf=c=>c.collection||(grpOf(c)==="pre"?"Pre-decimal":(c.country&&!/australia/i.test(c.country))?"World":"Decimal");
+function autoTitle(c){ return [c.year,c.denom,c.series].filter(x=>!blank(x)).join(" "); }
+/* A set looked up on Numista takes one coin's name ("… Olympic Team - Black"); show the name all its coins share instead */
+function setCommon(items){ const ts=(items||[]).map(i=>String(i.title||"").trim()).filter(Boolean); if(ts.length<2) return null;
+  let l=ts[0]; for(const t of ts) while(l&&!t.startsWith(l)) l=l.slice(0,-1);
+  let cut=-1; for(const m of l.matchAll(/\s[-–]\s|;\s|\s\(|,\s/g)) cut=m.index; if(ts.every(t=>t===l)) cut=l.length;
+  if(cut<6) return null; const raw=l.slice(0,cut).trim(); const open=(raw.match(/\(/g)||[]).length-(raw.match(/\)/g)||[]).length;
+  return {raw,name:raw+")".repeat(Math.max(0,open))}; }
+function setItemLabel(it,com){ const t=String(it.title||"").trim(); if(!com||!t.startsWith(com.raw)) return t; return t.slice(com.raw.length).replace(/^\s*[-–;,(]\s*/,"").replace(/\)+\s*$/,"").trim()||t; }
+function titleOf(c){ const t=(c.title||"").trim();
+  if(c.isSet){ const com=setCommon(c.setItems); if(com&&(!t||t.startsWith(com.raw))) return com.name; }
+  return t||autoTitle(c)||"Untitled coin"; }
+/* which coins in a set the search words point at, e.g. "green" → Green */
+function setHits(c,q){ if(!c.isSet||!q||!q.trim()) return []; const items=c.setItems||[]; if(items.length<2) return [];
+  const terms=norm(q.replace(/(\d{4})\s*(?:-|–|to|\.\.)\s*(\d{4})/g," ")).split(" ").filter(Boolean); if(!terms.length) return [];
+  const own=" "+norm([titleOf(c),c.series,c.year,c.denom,denomWords(c.denom)].join(" "))+" ";
+  const tx=it=>" "+norm([it.title,it.year,it.series,it.denom,denomWords(it.denom)].join(" "))+" ";
+  const hit=items.filter(it=>{ const h=tx(it); return terms.every(t=>/^\d+$/.test(t)?h.includes(" "+t+" ")||own.includes(" "+t+" "):h.includes(" "+t)||own.includes(" "+t)); });
+  if(!hit.length||hit.length===items.length) return []; const com=setCommon(items); return hit.map(it=>setItemLabel(it,com)); }
+function hitLine(c){ const h=setHits(c,S.q); return h.length?`<span class="sethit">✓ Includes ${esc(h.join(", "))}</span>`:""; }
+const yearNum=c=>{ const m=String(c.year||"").match(/\d{4}/); return m?+m[0]:null; };
+function gradeText(c){ return c.grade?(c.grade+(c.sheldon?"-"+c.sheldon:"")):""; }
+function gradeStyle(g){ g=String(g||""); if(/UNC|BU/.test(g)) return "background:#DCFCE7;color:#166534"; if(/^EF/.test(g)) return "background:#DBEAFE;color:#1E40AF"; if(/^VF/.test(g)) return "background:#FEF3C7;color:#92400E"; return "background:#E5E7EB;color:#374151"; }
+function gradePill(c){ const g=gradeText(c); if(g) return `<span class="grade" style="${gradeStyle(c.grade)}">${esc(g)}</span>`; if(c.finish==="Proof") return `<span class="grade" style="background:#F3E8FF;color:#6B21A8">Proof</span>`; return ""; }
+const mine=c=>(c.photos||[]).filter(p=>p.mine);
+function coverOf(c){ const ph=c.photos||[]; return ph.find(p=>p.id===c.coverId)||ph.find(p=>p.mine&&p.side==="Reverse")||ph.find(p=>p.mine)||ph.find(p=>p.side==="Reverse")||ph[0]||null; }
+function todoOf(c){ const t=[]; if(blank(c.year)) t.push("year"); if(!c.grade&&c.finish!=="Proof") t.push("grade"); if(!mine(c).length) t.push("your photos"); if(blank(c.storage)) t.push("storage location"); if(c.acqHow==="Bought"&&blank(c.price)) t.push("price paid"); return t; }
+function imgTag(p,attrs){ return p.url?`<img src="${esc(p.url)}" alt="" referrerpolicy="no-referrer" onerror="this.style.opacity=0" ${attrs||""}>`:`<img data-fid="${esc(p.id)}" alt="" ${attrs||""}>`; }
+function drawnCoin(c){ const d=dInfo(c.denom); return `<div class="coin m-${d.metal} ${d.shape||""}">${esc(c.denom?d.face:"?")}</div>`; }
+function faceHTML(c){ const p=coverOf(c); return `<div class="face">${p?imgTag(p):drawnCoin(c)}</div>`; }
+const fmtNum=n=>blank(n)?"":isNaN(+n)?String(n):Number(n).toLocaleString("en-AU");
+const unit=(v,u)=>blank(v)?"":`${v}${/[a-z]$/i.test(String(v))?"":" "+u}`;
+
+/* ================= search & filters ================= */
+const norm=s=>String(s??"").toLowerCase().normalize("NFKD").replace(/[̀-ͯ]/g,"").replace(/[^a-z0-9$½]+/g," ").trim();
+function denomWords(d){ if(!d) return ""; let m=d.match(/^\$(\d+)/); if(m) return `${m[1]} dollar dollars`; m=d.match(/^(\d+)c$/); if(m) return `${m[1]} cent cents`; return "pre decimal predecimal"; }
+function hay(c){ if(c._h&&c._hv===c.updatedAt) return c._h;
+  const parts=[titleOf(c),c.country,c.denom,denomWords(c.denom),c.year,c.mint&&("mint "+c.mint),c.series,c.variety,c.effigy,c.reverseDesigner,c.colourised?"coloured colour colourised color":"",c.isSet?"set":"",c.grade,GRADE_NAMES[c.grade],c.finish,c.packaging,c.serial,c.source,c.acqHow,c.storage,c.status,c.composition,c.edge,collOf(c),c.notes,c.history,c.ns&&c.ns.id?("n"+c.ns.id+" "+c.ns.id):"",c.ns&&c.ns.refs,c.setContents,(c.setItems||[]).map(it=>[it.title,it.year,it.series].filter(Boolean).join(" ")).join(" ")];
+  const h=" "+norm(parts.filter(Boolean).join(" "))+" "; Object.defineProperty(c,"_h",{value:h,writable:true,enumerable:false,configurable:true}); Object.defineProperty(c,"_hv",{value:c.updatedAt,writable:true,enumerable:false,configurable:true}); return h; }
+function matchQuery(c,q){
+  if(!q.trim()) return true; let rest=q;
+  const rng=[...q.matchAll(/(\d{4})\s*(?:-|–|to|\.\.)\s*(\d{4})/g)];
+  for(const m of rng){ const y=yearNum(c); if(y==null||y<+m[1]||y>+m[2]) return false; rest=rest.replace(m[0]," "); }
+  const h=hay(c);
+  for(const t of norm(rest).split(" ").filter(Boolean)){
+    if(/^\d{4}$/.test(t)){ if(String(yearNum(c))===t) continue; if(h.includes(" "+t)) continue; return false; }
+    if(/^\d+$/.test(t)){ if(!h.includes(" "+t+" ")) return false; continue; }
+    if(!h.includes(" "+t)) return false;
   }
-  return null;
+  return true;
 }
-async function chooseNewPassphrase() {
-  const a = prompt('Choose a family passphrase to lock the Dropbox copy (at least 12 characters — write it down):');
-  if (!a) return null;
-  if (a.length < 12) { toast('Use at least 12 characters'); return null; }
-  if (prompt('Type the passphrase again:') !== a) { toast("The two passphrases don't match"); return null; }
-  return a;
+function passFilters(c,f,skip){
+  const sk=k=>skip===k;
+  if(f.status==="owned"&&!isOwned(c)) return false; if(f.status==="sold"&&isOwned(c)) return false;
+  if(!sk("grp")&&f.grp.length&&!f.grp.includes(grpOf(c))) return false;
+  if(f.denom&&c.denom!==f.denom) return false;
+  if(f.coll&&collOf(c)!==f.coll) return false;
+  if(f.series&&(c.series||"")!==f.series) return false;
+  const y=yearNum(c); if(f.yFrom&&(y==null||y<+f.yFrom)) return false; if(f.yTo&&(y==null||y>+f.yTo)) return false;
+  if(f.mint&&(c.mint||"")!==f.mint) return false;
+  if(f.grade&&c.grade!==f.grade) return false;
+  if(f.finish&&c.finish!==f.finish) return false;
+  if(f.pack&&c.packaging!==f.pack) return false;
+  if(f.colour==="yes"&&c.colourised!==true) return false; if(f.colour==="no"&&c.colourised===true) return false;
+  if(f.how&&c.acqHow!==f.how) return false;
+  if(f.storage&&(c.storage||"")!==f.storage) return false;
+  if(f.photos==="mine"&&!mine(c).length) return false; if(f.photos==="none"&&mine(c).length) return false;
+  if(!sk("todo")&&f.todo&&!todoOf(c).length) return false;
+  if(!sk("dupes")&&f.dupes&&qtyOf(c)<2) return false;
+  if(f.sets&&!c.isSet) return false;
+  return true;
 }
-// After Dropbox sends the phone back here with ?code=…
-async function dbxReturn(params) {
-  history.replaceState(null, '', DB.redirectUri() + '#/sync');
-  try {
-    await DB.finishConnect(S.dev, saveDev, params);
-    const cl = dbxClient();
-    try { const a = await cl.account(); S.dev.dbx.email = a.email; await saveDev(); } catch {}
-    const rm = await cl.meta(DB.LIVE);
-    let remoteDoc = null;
-    if (rm) {
-      const env = JSON.parse(await cl.download(DB.LIVE));
-      if (S.dev.passphrase) { try { remoteDoc = await unlock(env, S.dev.passphrase); } catch { S.dev.passphrase = ''; } }
-      if (!remoteDoc) {
-        const got = await askPassphrase(env, 'Family passphrase — to unlock your bills in Dropbox:');
-        if (!got) { S.dev.dbx = null; await saveDev(); toast('Dropbox not connected — the passphrase is needed to open your bills', 5000); return; }
-        S.dev.passphrase = got.pass; remoteDoc = got.doc;
-      }
-    } else if (!S.dev.passphrase) {
-      const p = await chooseNewPassphrase();
-      if (!p) { S.dev.dbx = null; await saveDev(); toast('Dropbox not connected', 4000); return; }
-      S.dev.passphrase = p;
-    }
-    await saveDev();
-    if (!S.doc && !remoteDoc) { toast('Dropbox is connected, but there are no bills in it yet', 5000); render(); return; }
-    const wasEmpty = !S.doc;
-    S.doc = S.doc || St.joinDoc();
-    await doDbx();
-    if (wasEmpty) { await askName(); toast('Your bills are back — ' + C.liveBills(S.doc).length + ' bills from Dropbox', 5000); location.hash = '#/'; }
-    else toast('Dropbox connected — your bills are backed up there too', 4000);
-    queueSync(500);
-  } catch (e) { toast(e.message, 6000); }
-  render();
+function activeFilters(){ const f=S.f, a=[];
+  const add=(k,label)=>a.push({k,label});
+  if(f.denom) add("denom",f.denom); if(f.coll) add("coll",f.coll); if(f.series) add("series","Series: "+f.series);
+  if(f.yFrom||f.yTo) add("year",f.yFrom&&f.yTo?`${f.yFrom}–${f.yTo}`:f.yFrom?`From ${f.yFrom}`:`Up to ${f.yTo}`);
+  if(f.mint) add("mint","Mint mark: "+f.mint); if(f.grade) add("grade","Grade: "+f.grade); if(f.finish) add("finish",f.finish); if(f.pack) add("pack",f.pack);
+  if(f.colour) add("colour",f.colour==="yes"?"Coloured":"Not coloured"); if(f.how) add("how",f.how); if(f.storage) add("storage","In: "+f.storage);
+  if(f.photos) add("photos",f.photos==="mine"?"Has my photos":"No photos yet"); if(f.status!=="owned") add("status",f.status==="all"?"Incl. sold":"Sold / traded");
+  if(f.sets) add("sets","Sets only");
+  return a; }
+function clearFilter(k){ const f=S.f; if(k==="year"){ f.yFrom=""; f.yTo=""; } else if(k==="status") f.status="owned"; else f[k]=FDEF[k]; }
+function sorted(list){ const s=view().sort, by=(fn,dir)=>list.sort((a,b)=>{ const x=fn(a),y=fn(b); if(x==null&&y==null) return 0; if(x==null) return 1; if(y==null) return -1; return (x<y?-1:x>y?1:0)*dir; });
+  const dIdx=c=>DENOMS.indexOf(dInfo(c.denom));
+  if(s==="year-asc") by(yearNum,1); else if(s==="year-desc") by(yearNum,-1);
+  else if(s==="title") list.sort((a,b)=>titleOf(a).localeCompare(titleOf(b)));
+  else if(s==="added") by(c=>c.addedAt||"",-1);
+  else if(s==="value") by(c=>blank(c.value)?null:+c.value,-1);
+  else if(s==="mintage") by(c=>blank(c.mintage)?null:+c.mintage,1);
+  else if(s==="denom") list.sort((a,b)=>dIdx(a)-dIdx(b)||((yearNum(b)||0)-(yearNum(a)||0)));
+  return list; }
+function results(){ return sorted(S.coins.filter(c=>passFilters(c,S.f)&&matchQuery(c,S.q))); }
+function groupsOf(list){ const g=view().group; if(g==="none") return [{key:"all",label:"",items:list}];
+  const map=new Map(); const keyOf=c=>g==="denom"?grpOf(c):g==="series"?(c.series||""):g==="decade"?(yearNum(c)?Math.floor(yearNum(c)/10)*10+"s":""):g==="storage"?(c.storage||""):g==="collection"?collOf(c):"";
+  for(const c of list){ const k=keyOf(c); if(!map.has(k)) map.set(k,[]); map.get(k).push(c); }
+  let keys=[...map.keys()];
+  if(g==="denom") keys.sort((a,b)=>GRP_ORDER.indexOf(a)-GRP_ORDER.indexOf(b));
+  else if(g==="decade") keys.sort((a,b)=>(b||"0").localeCompare(a||"0"));
+  else keys.sort((a,b)=>(a===""?1:b===""?-1:a.localeCompare(b)));
+  const blankLbl={series:"No series",decade:"Year not recorded",storage:"Storage not recorded"}[g]||"Other";
+  return keys.map(k=>({key:k,label:g==="denom"?GROUPS[k].label:(k||blankLbl),theme:g==="denom"?GROUPS[k]:null,items:map.get(k)})); }
+
+/* ================= render: main tabs ================= */
+function render(){
+  document.querySelectorAll("nav.tabs [data-tab]").forEach(b=>b.setAttribute("aria-current",b.dataset.tab===S.tab?"page":"false"));
+  const wb=$("#wantBadge"), wn=S.wanted.filter(w=>!w.got).length; wb.hidden=!wn; wb.textContent=wn;
+  const m=$("#main");
+  m.innerHTML=S.tab==="coins"?viewCoins():S.tab==="albums"?viewAlbums():S.tab==="wants"?viewWants():viewMore();
+  hydrateImages(m); hdrStatus();
 }
-// Swap in an older copy (backup history or a Dropbox snapshot) on every phone.
-async function replaceDoc(old, label) {
-  old.updatedAt = Date.now();
-  const bump = (o) => { if (o && typeof o === 'object') o.u = Date.now(); };
-  const KEYS = ['accounts', 'types', 'properties', 'bills', 'payments', 'people', 'others', 'payOverrides'];
-  KEYS.forEach((k) => (old[k] || []).forEach(bump));
-  // anything added since that version is marked deleted so the merge doesn't bring it back
-  KEYS.forEach((k) => { old[k] = old[k] || []; const ids = new Set(old[k].map((x) => x.id)); for (const x of (S.doc && S.doc[k]) || []) if (!ids.has(x.id)) old[k].push({ ...x, del: true, u: Date.now() }); });
-  bump(old.settings);
-  old.transferChecks = old.transferChecks || {};
-  for (const k of Object.keys(old.transferChecks)) bump(old.transferChecks[k]);
-  for (const k of Object.keys((S.doc && S.doc.transferChecks) || {})) if (!old.transferChecks[k]) old.transferChecks[k] = { undone: true, u: Date.now(), by: who() };
-  S.doc = old;
-  await commit(label, () => {});
-  await doSync(true);
+function backupBanner(){
+  if(S.readOnly) return `<div class="banner"><span>View only — another ${devWord()} is now the main one.</span><button type="button" class="btn sm" data-more-go="backup">Details</button></div>`;
+  const ch=S.meta.changes||0, last=S.meta.lastBackup, dx=S.meta.dbx||{};
+  if(dbxOn()){ if(dx.lastError&&ch) return `<div class="banner"><span>Dropbox sync didn't work: ${esc(dx.lastError)}</span><button type="button" class="btn sm" data-more-go="backup">Fix</button></div>`; return ""; }
+  if(!S.coins.length) return "";
+  const days=last?Math.floor((Date.now()-new Date(last))/864e5):null;
+  if(!last) return `<div class="banner"><span>Your collection lives only on this ${devWord()}. Connect Dropbox so it's kept safe automatically.</span><button type="button" class="btn sm amber" data-more-go="backup">Set up</button></div>`;
+  if(ch&&days>=30) return `<div class="banner"><span>${ch} changes since your last backup ${days} days ago.</span><button type="button" class="btn sm amber" data-more-go="backup">Back up</button></div>`;
+  return "";
+}
+function viewCoins(){
+  const v=view(), owned=S.coins.filter(isOwned), nCoins=owned.reduce((a,c)=>a+coinsIn(c),0);
+  const val=owned.reduce((a,c)=>a+(blank(c.value)?0:+c.value*qtyOf(c)),0), paid=owned.reduce((a,c)=>{ const p=costEach(c); return a+(p==null?0:p*qtyOf(c)); },0);
+  const wants=S.wanted.filter(w=>!w.got).length;
+  if(!S.coins.length) return `<section class="view"><div class="hero"><div class="stats"><div class="stat"><b>0</b><span>Coins</span></div><div class="stat"><b>—</b><span>Value</span></div><div class="stat"><b>${wants}</b><span>Wanted</span></div></div></div>${backupBanner()}
+    <div class="empty"><b>No coins on this ${devWord()} yet</b><span>${dbxOn()?"Connected to Dropbox, but there's no collection there yet.":"New phone, or cleared Chrome? Connect Dropbox and your collection downloads automatically. To load your starter list, restore the backup file you were given."}</span>
+    <div class="row" style="justify-content:center">${dbxOn()?"":`<button type="button" class="btn primary" data-dbxconnect>Get my collection from Dropbox</button>`}<button type="button" class="btn" data-restore>Restore backup file</button><button type="button" class="btn amber" data-add>Add a coin</button></div></div></section>`;
+  const present=GRP_ORDER.filter(g=>S.coins.some(c=>grpOf(c)===g&&passFilters(c,S.f,"grp")));
+  const nTodo=S.coins.filter(c=>passFilters(c,{...S.f,todo:false},"todo")&&todoOf(c).length).length;
+  const nDup=S.coins.filter(c=>passFilters(c,{...S.f,dupes:false},"dupes")&&qtyOf(c)>1).length;
+  const act=activeFilters();
+  return `<section class="view">
+  <div class="hero">
+    <div class="stats">
+      <button type="button" class="stat" data-more-go="stats"><b style="color:#4338CA">${nCoins}</b><span>Coins</span></button>
+      <button type="button" class="stat" data-more-go="stats"><b style="color:#0F766E">${val?aud(Math.round(val)):paid?aud(Math.round(paid)):"—"}</b><span>${val?"Current value":"Total cost"}</span></button>
+      <button type="button" class="stat" data-tab="wants"><b style="color:#C2410C">${wants}</b><span>Wanted</span></button>
+    </div>
+    <div class="searchbar"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#4B5563" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+      <label for="q" class="sr">Search coins</label><input id="q" type="search" enterkeyhint="search" autocomplete="off" placeholder="Search: 2022 bee, Vietnam, safe, 1966-1970…" value="${esc(S.q)}">
+      <button type="button" class="clear" data-clearq aria-label="Clear search" ${S.q?"":"hidden"}>×</button></div>
+  </div>
+  ${backupBanner()}
+  <div class="tools">
+    <div class="seg" role="group" aria-label="View"><button type="button" data-mode="grid" aria-pressed="${v.mode==="grid"}">Grid</button><button type="button" data-mode="list" aria-pressed="${v.mode==="list"}">List</button><button type="button" data-tab="albums" aria-pressed="false">Albums</button></div>
+    ${v.mode==="grid"?`<div class="seg light" role="group" aria-label="Tile size">${["s","m","l"].map(s=>`<button type="button" data-size="${s}" aria-pressed="${v.size===s}" aria-label="${{s:"Small",m:"Medium",l:"Large"}[s]} tiles">${s.toUpperCase()}</button>`).join("")}</div>`:""}
+  </div>
+  <div class="chips">
+    <button type="button" class="fbtn" data-filters><svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M7 12h10M10 18h4"/></svg>Filters${act.length?`<b>${act.length}</b>`:""}</button>
+    ${present.map(g=>`<button type="button" class="chip" data-grp="${g}" aria-pressed="${S.f.grp.includes(g)}"><i style="background:${GROUPS[g].solid}"></i>${GROUPS[g].label}</button>`).join("")}
+    ${nTodo||S.f.todo?`<button type="button" class="chip" data-qf="todo" aria-pressed="${S.f.todo}">To finish · ${nTodo}</button>`:""}
+    ${nDup||S.f.dupes?`<button type="button" class="chip" data-qf="dupes" aria-pressed="${S.f.dupes}">Duplicates · ${nDup}</button>`:""}
+  </div>
+  ${act.length?`<div class="chips wrapy">${act.map(a=>`<button type="button" class="chip x" data-unf="${a.k}" aria-label="Remove filter ${esc(a.label)}">${esc(a.label)} ×</button>`).join("")}<button type="button" class="chip" data-clearall>Clear all</button></div>`:""}
+  <div id="results">${resultsHTML()}</div>
+  </section>`;
+}
+function resultsHTML(){
+  const v=view(), list=results(), n=list.reduce((a,c)=>a+coinsIn(c),0);
+  const filtered=!!(S.q.trim()||activeFilters().length||S.f.grp.length||S.f.todo||S.f.dupes);
+  const meta=`<div class="metarow"><span class="count">${filtered?`${list.length} match${list.length===1?"":"es"}`:`${list.length} record${list.length===1?"":"s"}`}${n!==list.length?` · ${n} coins`:""}</span>
+    <span class="row" style="gap:6px"><label class="sr" for="sortSel">Sort</label><select id="sortSel">${[["year-desc","Newest year"],["year-asc","Oldest year"],["denom","Denomination"],["title","Name A–Z"],["added","Recently added"],["value","Highest value"],["mintage","Lowest mintage"]].map(([k,l])=>`<option value="${k}" ${v.sort===k?"selected":""}>${l}</option>`).join("")}</select>
+    <label class="sr" for="groupSel">Group by</label><select id="groupSel">${[["denom","Group: denomination"],["series","Group: series"],["decade","Group: decade"],["storage","Group: storage"],["collection","Group: collection"],["none","No groups"]].map(([k,l])=>`<option value="${k}" ${v.group===k?"selected":""}>${l}</option>`).join("")}</select></span></div>`;
+  if(!list.length) return meta+`<div class="empty"><b>No coins match</b><span>Try fewer words, or clear a filter.</span>${activeFilters().length||S.q||S.f.grp.length||S.f.todo||S.f.dupes?`<button type="button" class="btn" data-clearall>Clear search &amp; filters</button>`:""}</div>`;
+  return meta+groupsOf(list).map(g=>`${g.label?`<div class="ghead"><h2>${g.theme?`<span class="gico" style="background:${g.theme.solid}">${esc(g.theme.badge)}</span>`:""}${esc(g.label)}</h2><span class="gcount" style="${g.theme?`background:${g.theme.tint};color:${g.theme.text}`:"background:#E6E8F2;color:#374151"}">${g.items.length}</span></div>`:""}
+    ${v.mode==="list"?`<div class="listbox">${g.items.map(rowHTML).join("")}</div>`:`<div class="tiles ${v.size==="m"?"":v.size}">${g.items.map(tileHTML).join("")}</div>`}`).join("");
+}
+function tileHTML(c){ const t=themeOf(c), p=coverOf(c);
+  return `<button type="button" class="tile" style="background:${t.tint}" data-open="${c.id}">${faceHTML(c)}${p&&!p.mine?`<span class="reftag">REF</span>`:""}${qtyOf(c)>1?`<span class="qty">×${qtyOf(c)}</span>`:""}
+    <span class="yr" style="color:${t.text}">${esc(c.year||"—")}</span>${(n=>`<span class="nm"><b>${esc(n.main)}</b>${n.sub?`<small>${esc(n.sub)}</small>`:""}</span>`)(nameParts(c))}${c.isSet?`<span class="setb">Set of ${setSize(c)}</span>`:""}${hitLine(c)}${gradePill(c)}</button>`; }
+/* Numista titles read "2 Dollars - Elizabeth II (4th portrait - Australian Olympic Team)": lead with the subject, keep the rest underneath */
+function nameParts(c){ const t=titleOf(c); const yr=String(c.year||"").replace(/[^\d]/g,""); const noYr=s=>(yr?s.replace(new RegExp("^"+yr+"\\s+"),""):s)||s;
+  const m=t.match(/^(.*?)\s+-\s+([^()]+?)\s*\((.+)\)\s*$/);
+  if(m){ const subj=m[3].split(/\s+-\s+|;\s*/).map(x=>x.trim()).filter(x=>x&&!/portrait$/i.test(x)).join(" · ");
+    if(subj) return {main:subj,sub:[m[1].trim(),m[2].trim()].join(" · ")}; }
+  return {main:noYr(t),sub:""}; }
+function shortName(c){ const t=titleOf(c); let s=t.replace(new RegExp("^"+String(c.year||"").replace(/[^\d]/g,"")+"\\s*"),""); return s||t; }
+function rowHTML(c){ const p=coverOf(c), t=themeOf(c);
+  return `<button type="button" class="lrow" data-open="${c.id}">${faceHTML(c)}<span class="tx"><span class="t1">${esc(nameParts(c).main)}</span>${hitLine(c)}<span class="t2">${esc([nameParts(c).sub||c.denom,c.mint&&c.mint!=="None"?"Mint "+c.mint:"",c.packaging,c.storage].filter(Boolean).join(" · ")||"Tap to add details")}</span></span>
+    <span class="rt">${c.isSet?`<span class="setb">Set of ${setSize(c)}</span>`:""}${gradePill(c)}${qtyOf(c)>1?`<span>×${qtyOf(c)}</span>`:""}${p&&!p.mine?`<span style="color:var(--ref);font-size:10px;font-weight:800">REF PHOTO</span>`:""}<i style="width:8px;height:8px;border-radius:4px;background:${t.solid}"></i></span></button>`; }
+
+/* ---------- albums ---------- */
+function progBar(o,w,t){ const T=Math.max(1,t); return `<div class="prog" role="progressbar" aria-valuenow="${o}" aria-valuemin="0" aria-valuemax="${t}" aria-label="Owned ${o} of ${t}"><i style="width:${o/T*100}%;background:#0D9488"></i><i style="width:${w/T*100}%;background:#F59E0B"></i></div>`; }
+function viewAlbums(){
+  const al=albumData(), tl=typeLists();
+  return `<section class="view"><div class="hero" style="padding-top:12px"><h1 style="color:#fff;font-size:22px">Albums</h1><p class="m0" style="color:var(--on-indigo);font-size:13px">Coins grouped by theme or series, with gaps for the ones on your want list.</p></div>
+  ${al.length?`<div class="listbox">${al.map(a=>{ const o=a.units.length,w=a.wants.length; const u0=a.units[0]; return `<button type="button" class="alb" data-album="${esc(a.key)}">${u0?unitFace(u0,48):`<span class="gico" style="background:#F59E0B;width:48px;height:48px;border-radius:24px">♡</span>`}<span class="tx"><b>${esc(a.key)}</b><span class="muted small">${o} owned${w?` · ${w} wanted`:""}</span>${w?progBar(o,0,o+w):""}</span><svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#4B5563" stroke-width="2"><path d="m9 6 6 6-6 6"/></svg></button>`; }).join("")}</div>`
+   :`<div class="empty"><b>No albums yet</b><span>Give coins a Theme / series (for example "Australian Dinosaurs") and they gather here. Add wants with the same series to see the gaps.</span></div>`}
+  ${tl.length?`<h2 style="font-size:16px;font-weight:800;margin-top:6px">Year checklists</h2><p class="m0 muted small">Every year and mint mark Numista lists for these coin types.</p><div class="listbox">${tl.map(t=>{ const own=t.issues.filter(i=>ownsIssue(t.id,i)).length; return `<button type="button" class="alb" data-tlist="${t.id}"><span class="tx"><b>${esc(t.title)}</b><span class="muted small">${own} of ${t.issues.length} issues</span>${progBar(own,0,t.issues.length)}</span><svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#4B5563" stroke-width="2"><path d="m9 6 6 6-6 6"/></svg></button>`; }).join("")}</div>`:""}
+  </section>`;
+}
+function units(){ const out=[]; for(const c of S.coins.filter(isOwned)){ const items=c.isSet?(c.setItems||[]):[];
+    if(items.length){ for(const it of items) out.push({open:c.id,coin:c,item:it,ns:it.ns,year:it.year||c.year,mint:it.mint||"",denom:it.denom||c.denom,series:c.series||it.series||"",title:it.title||titleOf(c)}); }
+    else out.push({open:c.id,coin:c,ns:c.ns,year:c.year,mint:c.mint||"",denom:c.denom,series:c.series||"",title:titleOf(c)}); }
+  return out; }
+function unitFace(u,size){ const st=`style="--face:${size}px;width:${size}px;height:${size}px"`; if(!u.item) return faceHTML(u.coin).replace('class="face"',`class="face" ${st}`); const p=(u.item.photos||[]).find(p=>p.side==="Reverse")||(u.item.photos||[])[0]; return `<div class="face" ${st}>${p?imgTag(p):drawnCoin({denom:u.denom})}</div>`; }
+const unitYear=u=>{ const m=String(u.year||"").match(/\d{4}/); return m?+m[0]:null; };
+const unitTheme=u=>GROUPS[u.denom?dInfo(u.denom).grp:"other"];
+function albumData(){
+  const map=new Map(); const get=k=>{ if(!map.has(k)) map.set(k,{key:k,units:[],wants:[]}); return map.get(k); };
+  for(const u of units()) if(u.series) get(u.series).units.push(u);
+  for(const w of S.wanted.filter(w=>!w.got)) if(w.series) get(w.series).wants.push(w);
+  return [...map.values()].sort((a,b)=>a.key.localeCompare(b.key));
+}
+function typeLists(){ const m=new Map(); for(const u of units()){ const ns=u.ns; if(ns&&ns.id&&(ns.issues||[]).length>1){ const k=String(ns.id); if(!m.has(k)) m.set(k,{id:ns.id,title:ns.title||u.title,issues:ns.issues,units:[]}); m.get(k).units.push(u); } } return [...m.values()]; }
+const issueMatch=(u,i)=>String(unitYear(u))===String(i.year)&&(((u.mint&&u.mint!=="None")?u.mint:"")===(i.mint||""));
+function ownerOfIssue(nsId,i){ return units().find(u=>u.ns&&String(u.ns.id)===String(nsId)&&issueMatch(u,i)); }
+const ownsIssue=(nsId,i)=>!!ownerOfIssue(nsId,i);
+
+/* ---------- wants ---------- */
+function viewWants(){
+  const open=S.wanted.filter(w=>!w.got), got=S.wanted.filter(w=>w.got);
+  return `<section class="view"><div class="hero" style="padding-top:12px"><h1 style="color:#fff;font-size:22px">Want list</h1><p class="m0" style="color:var(--on-indigo);font-size:13px">Coins you're hunting for. Tap "Got it" to turn one into a coin record.</p></div>
+  <details class="fsec" ${open.length?"":"open"}><summary><span class="ico" style="background:#F59E0B"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></span>Add a want<span class="sp"></span></summary>
+   <form id="wantForm" class="grid2">
+    <div class="field full"><label for="w_title">What is it?</label><input id="w_title" name="title" required placeholder="e.g. 2023 $2 Coronation, mint mark C"></div>
+    <div class="field"><label for="w_denom">Denomination</label><select id="w_denom" name="denom"><option value="">—</option>${DENOMS.map(d=>`<option>${d.k}</option>`).join("")}</select></div>
+    <div class="field"><label for="w_year">Year</label><input id="w_year" name="year" inputmode="numeric" placeholder="e.g. 2023"></div>
+    <div class="field full"><label for="w_series">Theme / series <span class="hint">puts it in that album</span></label><input id="w_series" name="series" list="dl_series" placeholder="e.g. Australian Dinosaurs"></div>
+    <div class="field"><label for="w_target">Happy to pay up to (A$)</label><input id="w_target" name="target" inputmode="decimal"></div>
+    <div class="field"><label for="w_notes">Notes</label><input id="w_notes" name="notes"></div>
+    <div class="full"><button class="btn primary block" type="submit">Add to want list</button></div></form>${datalists()}</details>
+  ${open.length?`<div class="lst">${open.map(w=>`<div class="item"><span class="gico" style="background:${GROUPS[w.denom?dInfo(w.denom).grp:"other"].solid}">${esc(w.denom?dInfo(w.denom).face:"?")}</span><div><b>${esc(w.title)}</b><div class="muted small">${esc([w.year,w.series,w.target?"up to "+aud(w.target):"",w.notes].filter(Boolean).join(" · "))}</div></div><button type="button" class="btn sm primary" data-wgot="${w.id}">Got it</button><button type="button" class="btn sm ghost" data-wdel="${w.id}" aria-label="Remove ${esc(w.title)}">×</button></div>`).join("")}</div>`:`<div class="empty"><b>Nothing on your want list</b><span>Add the coins you're looking for — they also show as gaps in your albums.</span></div>`}
+  ${got.length?`<details class="fsec"><summary>Found (${got.length})<span class="sp"></span></summary><div class="lst">${got.map(w=>`<div class="item"><div><b>${esc(w.title)}</b><div class="muted small">Found${w.gotAt?" "+fmtDate(w.gotAt.slice(0,10)):""}</div></div><button type="button" class="btn sm ghost" data-wdel="${w.id}" aria-label="Remove">×</button></div>`).join("")}</div></details>`:""}
+  </section>`;
 }
 
-function renderStatusOnly() { const el = document.getElementById('syncdot'); if (el) el.outerHTML = syncDot().toString(); }
-function syncDot() {
-  if (!S.dev || !S.dev.github) return h`<span id="syncdot"></span>`;
-  const map = { ok: ['#1B6B3A', 'Synced'], syncing: ['#D08A1E', 'Syncing…'], error: ['#B3261E', 'Sync problem'], off: ['#8A948D', 'Not synced yet'] };
-  const [c, t] = map[S.sync] || map.off;
-  return h`<a id="syncdot" href="#/sync" class="xs muted row" style="gap:6px"><span class="dot" style="background:${c};border-radius:5px"></span>${t}</a>`;
+/* ---------- more ---------- */
+const backMore=`<button type="button" class="btn sm" data-more="" style="align-self:flex-start">‹ More</button>`;
+function menuIco(bg,path){ return `<span class="ico" style="background:${bg};width:40px;height:40px;border-radius:12px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:20px;height:20px">${path}</svg></span>`; }
+function viewMore(){
+  const mv=S.moreView;
+  if(mv==="backup") return viewBackup(); if(mv==="numista") return viewNumista(); if(mv==="stats") return viewStats(); if(mv==="export") return viewExport(); if(mv==="report") return viewReport(); if(mv==="checklist") return viewChecklist(); if(mv==="about") return viewAbout(); if(mv==="guide") return viewGuide(); if(mv==="receipts") return viewReceipts();
+  const k=nsKey();
+  return `<section class="view"><div class="hero" style="padding-top:12px"><h1 style="color:#fff;font-size:22px">More</h1></div><div class="menu">
+    <button type="button" data-more="backup">${menuIco("#4338CA",'<path d="M7 18a4 4 0 0 1-.6-8A6 6 0 0 1 18 9a4.5 4.5 0 0 1-.5 9z"/>')}<span class="tx"><b>Backup &amp; restore</b><span class="muted small">${S.readOnly?"View only":dbxOn()?"Kept in Dropbox":"Connect Dropbox, or make a backup file"}${S.meta.changes?` · ${S.meta.changes} not backed up`:""}</span></span></button>
+    <button type="button" data-more="numista">${menuIco("#0D9488",'<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>')}<span class="tx"><b>Numista lookups</b><span class="muted small">${k?"Key saved · "+nsUsage():"Add your free API key"}</span></span></button>
+    <button type="button" data-more="guide">${menuIco("#2563EB",'<path d="M5 4h11l3 3v13H5z"/><path d="M9 10h6M9 14h6"/>')}<span class="tx"><b>Collector's guide</b><span class="muted small">Grades, finishes, mint marks, care</span></span></button>
+    <button type="button" data-more="receipts">${menuIco("#0F766E",'<path d="M6 3h12v18l-3-2-3 2-3-2-3 2z"/><path d="M9 8h6M9 12h6"/>')}<span class="tx"><b>Receipts &amp; documents</b><span class="muted small">${S.receipts.length?S.receipts.length+" receipt"+(S.receipts.length===1?"":"s"):"Photos and PDFs of your purchases"}</span></span></button>
+    <button type="button" data-more="stats">${menuIco("#D97706",'<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>')}<span class="tx"><b>Statistics</b><span class="muted small">Totals, value, by denomination</span></span></button>
+    <button type="button" data-more="checklist">${menuIco("#059669",'<path d="M9 6h11M9 12h11M9 18h11"/><path d="m3 6 1.5 1.5L7 5M3 12l1.5 1.5L7 11M3 18l1.5 1.5L7 17"/>')}<span class="tx"><b>Collection checklist</b><span class="muted small">By denomination, with your wants — for coin fairs</span></span></button>
+    <button type="button" data-more="report">${menuIco("#7C3AED",'<path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5M9 13h7M9 17h7"/>')}<span class="tx"><b>Insurance report</b><span class="muted small">PDF listing with photos and values</span></span></button>
+    <button type="button" data-more="export">${menuIco("#0284C7",'<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>')}<span class="tx"><b>Export CSV</b><span class="muted small">Spreadsheet copy for Excel</span></span></button>
+    <button type="button" data-more="about">${menuIco("#475569",'<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/>')}<span class="tx"><b>About MyMint</b><span class="muted small">Version ${APP_VERSION} · where your data lives</span></span></button>
+  </div><p class="muted small" style="text-align:center;margin:4px 0 0">MyMint · Version ${APP_VERSION}</p></section>`;
+}
+const SITE_DATA_WARN=`<div class="banner"><span><b>Warning:</b> clearing Chrome's <b>"Cookies and site data"</b> (or uninstalling Chrome) <b>deletes the collection on this ${devWord()}</b>. With Dropbox connected it comes back when you reconnect; without it, only a backup file can bring it back.</span></div>`;
+function viewBackup(){
+  return `<section class="view">${backMore}${SITE_DATA_WARN}${dbxPanel()}
+  <div class="panel"><h3>Backup file</h3><p class="m0">Makes one .zip file with every coin, photo and want, and saves it to your Downloads. Never upload a backup to GitHub — the repository is public.</p>
+    <div class="row"><button type="button" class="btn ${dbxOn()?"":"primary"}" data-backup>Make backup file</button><span class="muted small" id="bkStat"></span></div><div id="bkOut" class="row"></div></div>
+  <div class="panel"><h3>Restore</h3><p class="m0">Loads a backup onto this ${devWord()}. It <b>replaces</b> everything currently in the app. ${dbxOn()?"A snapshot of what's here now is saved to Dropbox first, so a restore can be undone.":"Use it on a new phone, to load your starter list, or to undo mistakes."}</p>
+    <div class="row"><button type="button" class="btn" data-restore>Choose backup file…</button>${dbxOn()?`<button type="button" class="btn" data-dbxlist>Restore a Dropbox snapshot…</button>`:""}<span class="muted small" id="rsStat"></span></div><div id="dbxList"></div><div id="rsConfirm"></div></div></section>`;
+}
+function viewStats(){
+  const owned=S.coins.filter(isOwned); const n=owned.reduce((a,c)=>a+coinsIn(c),0);
+  const coinsPaid=owned.reduce((a,c)=>{ const p=priceAUD(c); return a+(p==null?0:p*qtyOf(c)); },0), postPaid=owned.reduce((a,c)=>a+(priceAUD(c)==null?0:postageTotal(c)),0), paid=coinsPaid+postPaid;
+  const val=owned.reduce((a,c)=>a+(blank(c.value)?0:+c.value*qtyOf(c)),0);
+  const both=owned.filter(c=>!blank(c.value)&&costEach(c)!=null); const bp=both.reduce((a,c)=>a+costEach(c)*qtyOf(c),0), bv=both.reduce((a,c)=>a+(+c.value)*qtyOf(c),0);
+  const by={}; for(const c of owned){ const g=grpOf(c); by[g]=(by[g]||0)+qtyOf(c); }
+  const bars=(entries,colorFn)=>{ const max=Math.max(1,...entries.map(e=>e[1])); return `<div class="bars">${entries.map(([k,v])=>`<div class="bar"><span>${esc(k)}</span><div class="track"><div class="fill" style="width:${v/max*100}%;background:${colorFn(k)}"></div></div><span class="v">${v}</span></div>`).join("")}</div>`; };
+  const ser={}; for(const c of owned) if(c.series) ser[c.series]=(ser[c.series]||0)+coinsIn(c);
+  const sto={}; for(const c of owned) sto[c.storage||"Not recorded"]=(sto[c.storage||"Not recorded"]||0)+coinsIn(c);
+  const todo=owned.filter(c=>todoOf(c).length).length;
+  return `<section class="view">${backMore}
+  <div class="stats"><div class="stat"><b style="color:#4338CA">${n}</b><span>Coins (${owned.length} records)</span></div><div class="stat"><b style="color:#0F766E">${val?aud(Math.round(val)):"—"}</b><span>Current value</span></div><div class="stat"><b style="color:#B45309">${paid?aud(Math.round(paid)):"—"}</b><span>Total cost</span></div></div>
+  ${postPaid?`<p class="m0 muted small">Total cost = coins ${esc(aud(Math.round(coinsPaid)))} + postage &amp; fees ${esc(aud(Math.round(postPaid)))}.</p>`:""}
+  ${both.length?`<div class="panel"><h3>Gain against total cost (price + postage)</h3><p class="m0"><b style="font-size:22px;color:${bv>=bp?"#15803D":"#B91C1C"}">${bv>=bp?"+":"−"}${aud(Math.abs(Math.round(bv-bp)))}</b> <span class="muted">across ${both.length} record${both.length===1?"":"s"} (cost ${aud(Math.round(bp))}, now ${aud(Math.round(bv))})</span></p></div>`:""}
+  ${denomPanel(owned)}
+  ${Object.keys(ser).length?`<div class="panel"><h3>By series</h3>${bars(Object.entries(ser).sort((a,b)=>b[1]-a[1]).slice(0,12),()=>"#4338CA")}</div>`:""}
+  <div class="panel"><h3>Where they're kept</h3>${bars(Object.entries(sto).sort((a,b)=>b[1]-a[1]),k=>k==="Not recorded"?"#A5ABB8":"#7C3AED")}</div>
+  ${todo?`<div class="todo"><span>${todo} record${todo===1?"":"s"} still need details (year, grade, photos or storage).</span><button type="button" class="btn sm" data-showtodo>Show them</button></div>`:""}
+  </section>`;
+}
+const CSV_COLS=[["title",titleOf],["denomination",c=>c.denom],["year"],["mintMark",c=>c.mint],["series"],["country"],["collection",collOf],["colourised",c=>c.colourised===true?"Yes":c.colourised===false?"No":""],["isSet",c=>c.isSet?"Yes":""],["coinsInSet",c=>c.isSet?setSize(c):""],["setContents",c=>(c.setItems||[]).map(it=>[it.year,it.title].filter(Boolean).join(" ")).join("; ")||c.setContents],["grade"],["sheldon"],["finish"],["packaging"],["serial"],["quantity",qtyOf],["howAcquired",c=>c.acqHow],["dateAcquired",c=>c.acqDate],["source"],["priceEach",c=>c.price],["priceCurrency",c=>curOf(c.priceCur)],["priceEachAUD",c=>priceAUD(c)],["postageEachAUD",c=>{ const p=postageEach(c); return p?Math.round(p*100)/100:""; }],["totalCostEachAUD",c=>costEach(c)],["valueEachAUD",c=>c.value],["valueDate"],["storage"],["status",c=>c.status||"In collection"],["composition"],["massG",c=>c.mass],["diameterMm",c=>c.diameter],["thicknessMm",c=>c.thickness],["edge"],["mintage"],["effigy"],["reverseDesigner"],["variety"],["numistaId",c=>c.ns&&c.ns.id],["catalogueRefs",c=>c.ns&&c.ns.refs],["myPhotos",c=>mine(c).length],["referencePhotos",c=>(c.photos||[]).filter(p=>!p.mine).length],["receipts",c=>(c.receiptIds||[]).length||""],["historicalContext",c=>c.history],["notes"]];
+function toCSV(){ const q=v=>{ v=v==null?"":String(v); return /[",\n\r]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v; }; return "﻿"+[CSV_COLS.map(c=>c[0]).join(","),...S.coins.map(c=>CSV_COLS.map(([k,fn])=>q(fn?fn(c):c[k])).join(","))].join("\r\n"); }
+function viewExport(){ const url=URL.createObjectURL(new Blob([toCSV()],{type:"text/csv"})); return `<section class="view">${backMore}<div class="panel"><h3>Export CSV</h3><p class="m0">${S.coins.length} coins, ${CSV_COLS.length} columns. Opens in Excel. This is a spreadsheet copy, not a backup — photos aren't included and it can't be restored.</p><div class="row"><a class="btn primary" href="${url}" download="mymint-coins-${todayISO()}.csv">Save CSV</a><button type="button" class="btn" data-copycsv>Copy CSV text</button></div><textarea class="csv" id="csvText" readonly aria-label="CSV text">${esc(toCSV().slice(1))}</textarea></div></section>`; }
+window.addEventListener("afterprint",()=>{ const el=$("#report"); if(el) el.innerHTML=""; });
+function viewAbout(){ return `<section class="view">${backMore}<div class="panel"><h3>Where your data lives</h3><p class="m0"><b>Version ${APP_VERSION}</b>.</p><p class="m0">Everything — coins, photos and wants — is stored in this browser on this ${devWord()}${dbxOn()?", and a live copy is kept in your own Dropbox":""}. Catalogue details come from Numista when you look a coin up (catalogue data provided by Numista). Exchange rates come from Frankfurter. The app works offline once installed.</p><dl class="dbxst" id="storeInfo"><dt>Storage used</dt><dd>…</dd></dl></div></section>`; }
+async function fillStoreInfo(){ const el=$("#storeInfo"); if(!el) return; let used="Unknown",prot="Unknown"; try{ const e=await navigator.storage.estimate(); used=(e.usage/1048576).toFixed(1)+" MB"; }catch{} try{ prot=(await navigator.storage.persisted())?"Yes — the browser won't clear it to save space":"Not yet — it's requested when you save"; }catch{} el.innerHTML=`<dt>Storage used</dt><dd>${used}</dd><dt>Protected storage</dt><dd>${prot}</dd>`; }
+
+/* ================= Numista ================= */
+const NS_API="https://api.numista.com/v3";
+const asList=x=>Array.isArray(x)?x:(x&&(x.issues||x.items||x.types))||[];
+const nsSet=()=>S.settings.find(x=>x.id==="numista")||{id:"numista"};
+const nsKey=()=>nsSet().key||"";
+function nsUsage(){ const u=S.meta.nsCalls||{}; const m=todayISO().slice(0,7); return `${u.month===m?u.n:0} of 2,000 lookups used this month`; }
+async function nsFetch(path){
+  const key=nsKey(); if(!key) throw new Error("Add your Numista API key first (More › Numista lookups).");
+  if(navigator.onLine===false) throw new Error("No internet connection — Numista lookups need to be online.");
+  let r; try{ r=await fetch(NS_API+path+(path.includes("?")?"&":"?")+"lang=en",{headers:{"Numista-API-Key":key}}); }catch(e){ throw new Error("Couldn't reach Numista (no connection, or the request was blocked)."); }
+  const m=todayISO().slice(0,7); const u=S.meta.nsCalls||{}; S.meta.nsCalls={month:m,n:(u.month===m?u.n:0)+1}; saveMeta().catch(()=>{});
+  if(r.status===401) throw new Error("Numista didn't accept the API key — check it in More › Numista lookups.");
+  if(r.status===429) throw new Error("Numista's monthly lookup limit has been reached.");
+  if(r.status===404) throw new Error("Numista doesn't have that entry.");
+  if(!r.ok){ let m=""; try{ const j=await r.json(); m=j.error_message||j.message||j.error||""; }catch{} const e=new Error("Numista error "+r.status+(m?": "+String(m).slice(0,140):"")); e.status=r.status; throw e; }
+  return r.json();
+}
+const stripHtml=h=>{ if(!h) return ""; const d=document.createElement("div"); d.innerHTML=String(h).replace(/<br\s*\/?>/gi,"\n").replace(/<\/p>/gi,"\n\n"); return d.textContent.replace(/\n{3,}/g,"\n\n").trim(); };
+const nameList=a=>[...new Set((a||[]).map(x=>typeof x==="string"?x:(x&&x.name)||"").filter(Boolean))];
+function denomFromValue(v){ if(!v) return ""; const t=String(v.text||"").toLowerCase(), n=v.numeric_value;
+  if(/cent/.test(t)){ const k=(n<1?Math.round(n*100):n)+"c"; return DENOMS.some(d=>d.k===k)?k:"Other"; }
+  if(/dollar/.test(t)){ const k="$"+(+n); return DENOMS.some(d=>d.k===k)?k:"Other"; }
+  if(/halfpenny|half penny|½ penny/.test(t)) return "Halfpenny"; if(/penny/.test(t)&&!/pence/.test(t)) return "Penny";
+  if(/threepence|3 pence/.test(t)) return "Threepence"; if(/sixpence|6 pence/.test(t)) return "Sixpence";
+  if(/florin|2 shillings/.test(t)) return "Florin"; if(/crown|5 shillings/.test(t)) return "Crown"; if(/shilling/.test(t)) return "Shilling";
+  return "Other"; }
+function fromNumista(t,issue){
+  const o={};
+  o.title=t.title||""; o.country=t.issuer&&t.issuer.name||""; o.denom=denomFromValue(t.value);
+  if(issue){ o.year=issue.year!=null?String(issue.year):issue.gregorian_year!=null?String(issue.gregorian_year):""; o.mint=issue.mint_letter||""; if(issue.mintage) o.mintage=String(issue.mintage); }
+  else if(t.min_year&&t.min_year===t.max_year) o.year=String(t.min_year);
+  o.composition=t.composition&&t.composition.text||""; o.mass=t.weight!=null?String(t.weight):""; o.diameter=t.size!=null?String(t.size):""; o.thickness=t.thickness!=null?String(t.thickness):"";
+  o.edge=t.edge&&t.edge.description||"";
+  const ob=t.obverse||{}, rv=t.reverse||{}; o.effigy=nameList([...(ob.designers||[]),...(ob.engravers||[])]).join(", "); o.reverseDesigner=nameList([...(rv.designers||[]),...(rv.engravers||[])]).join(", ");
+  o.series=typeof t.series==="string"?t.series:(t.series&&t.series.name)||t.commemorated_topic||"";
+  o.history=stripHtml(t.comments);
+  for(const k of Object.keys(o)) if(blank(o[k])) delete o[k];
+  return o;
+}
+function nsInfo(t,issues){ return {id:t.id,url:t.url||`https://en.numista.com/${t.id}`,title:t.title||"",refs:(t.references||[]).map(r=>`${(r.catalogue&&r.catalogue.code)||""} ${r.number||""}`.trim()).filter(Boolean).join(", "),
+  issues:(issues||[]).map(i=>({year:i.year!=null?i.year:i.gregorian_year,mint:i.mint_letter||"",mintage:i.mintage||null,id:i.id})).filter(i=>i.year!=null),fetchedAt:new Date().toISOString()}; }
+async function nsImage(url){ if(!url) return null;
+  try{ const r=await fetch(url,{mode:"cors"}); if(!r.ok) throw 0; const b=await r.blob(); if(!/^image\//.test(b.type)) throw 0; const small=await resizeImage(b,1200); const id=uid("f"); await dbPut("files",{id,blob:small,type:"image/jpeg",name:id+".jpg"}); return {id}; }
+  catch{ return {id:uid("r"),url}; } }
+function applyNs(draft,o,overwriteAll){ draft.nsFilled=draft.nsFilled||{}; for(const [k,v] of Object.entries(o)){ if(overwriteAll||blank(draft[k])||draft.nsFilled[k]===draft[k]){ draft[k]=v; draft.nsFilled[k]=v; } } }
+async function nsRefresh(id){
+  const c=clone(S.coins.find(x=>x.id===id)); if(!c||!c.ns) return;
+  toast("Checking Numista…");
+  try{ const t=await nsFetch(`/types/${c.ns.id}`); let issues=[]; try{ issues=asList(await nsFetch(`/types/${c.ns.id}/issues`)); }catch{}
+    const issue=(issues||[]).find(i=>String(i.year)===String(yearNum(c))&&(i.mint_letter||"")===((c.mint&&c.mint!=="None")?c.mint:""))||null;
+    const before=JSON.stringify(c); applyNs(c,fromNumista(t,issue),false); c.ns=nsInfo(t,issues);
+    c.updatedAt=new Date().toISOString(); await dbPut("coins",c); await reload(); drawTop();
+    toast(JSON.stringify(c)!==before?"Updated from Numista — your own edits were kept":"Already up to date");
+  }catch(e){ toast(e.message||String(e)); }
 }
 
-// Any time stamp in the future (e.g. a phone with a wrong clock) is pulled back
-// so it can't block later edits from winning a merge.
-function clampStamps(d) {
-  const now = Date.now() - 1000;
-  const fix = (o) => { if (o && typeof o === 'object' && typeof o.u === 'number' && o.u > now) o.u = now; };
-  ['accounts', 'types', 'properties', 'bills', 'payments', 'people', 'others', 'payOverrides', 'activity'].forEach((k) => (d[k] || []).forEach(fix));
-  fix(d.settings); Object.values(d.transferChecks || {}).forEach(fix);
-  if (d.updatedAt > now) d.updatedAt = now;
-  return d;
+/* ================= sheets: a small stack so the phone's Back button works ================= */
+function openView(d){ const sh=$("#sheet"); if(S.stack.length){ S.stack[S.stack.length-1].scroll=sh.scrollTop; } else { history.pushState({mm:1},""); } S.stack.push(d); drawTop(true); }
+function replaceView(d){ S.stack[S.stack.length-1]=d; drawTop(true); }
+async function popView(){ const d=S.stack.pop(); await cleanupView(d); if(!S.stack.length){ S._ignorePop=true; history.back(); } drawTop(); }
+async function cleanupView(d){ if(d&&d.kind==="edit"&&!d.saved&&d.newFiles){ for(const f of d.newFiles) await dbDel("files",f); } }
+window.addEventListener("popstate",async()=>{
+  if(S._ignorePop){ S._ignorePop=false; return; }
+  const z=$("#zoom"); if(z){ z.remove(); history.pushState({mm:1},""); return; }
+  if(S.stack.length){ const d=S.stack.pop(); await cleanupView(d); if(S.stack.length) history.pushState({mm:1},""); drawTop(); }
+});
+function drawTop(fresh){
+  const sh=$("#sheet"), d=S.stack[S.stack.length-1];
+  if(!d){ sh.hidden=true; sh.innerHTML=""; document.body.style.overflow=""; render(); return; }
+  const keep=fresh?0:(d.scroll!=null?d.scroll:sh.scrollTop);
+  sh.innerHTML=d.kind==="detail"?detailHTML(d):d.kind==="edit"?editHTML(d):d.kind==="add"?addHTML(d):d.kind==="filters"?filtersHTML(d):d.kind==="album"?albumHTML(d):d.kind==="tlist"?tlistHTML(d):d.kind==="nsfind"?nsfindHTML(d):d.kind==="guide"?guideHTML(d):d.kind==="setfind"?setfindHTML(d):d.kind==="receipt"?receiptHTML(d):d.kind==="rcpick"?rcpickHTML(d):"";
+  sh.hidden=false; document.body.style.overflow="hidden"; sh.scrollTop=keep; d.scroll=null; hydrateImages(sh);
+  sh.querySelectorAll(".pick.scroll").forEach(row=>{ const on=row.querySelector('[aria-pressed="true"]'); if(on) row.scrollLeft=Math.max(0,on.offsetLeft-row.clientWidth/2+on.offsetWidth/2); });
+  if(d.kind==="guide"&&fresh&&d.open){ const el=document.getElementById("g_"+d.open); if(el) setTimeout(()=>{ sh.scrollTop=el.offsetTop-70; },30); }
+  if(d.kind==="add"&&fresh){ const i=$("#nsq"); if(i&&!d.results) setTimeout(()=>i.focus(),60); }
+}
+const topV=()=>S.stack[S.stack.length-1];
+const backBtn=(label)=>`<button type="button" class="back" data-back><svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="m15 18-6-6 6-6"/></svg>${esc(label||"Back")}</button>`;
+
+/* ---------- coin record ---------- */
+function photoOrder(c){ const ph=(c.photos||[]).slice(); const cv=coverOf(c); ph.sort((a,b)=>(b===cv)-(a===cv)||(b.mine-a.mine)); return ph; }
+function kv(label,val){ return blank(val)||val===false?"":`<div class="kv"><span>${esc(label)}</span><span>${val===true?"Yes":esc(val)}</span></div>`; }
+function kvH(label,html){ return html?`<div class="kv"><span>${esc(label)}</span><span>${html}</span></div>`:""; }
+function cardH(title,bg,icon,body,extra){ return body.trim()?`<section class="card"><h3><span class="ico" style="background:${bg}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">${icon}</svg></span>${esc(title)}<span class="sp"></span>${extra||""}</h3>${body}</section>`:""; }
+function detailHTML(d){
+  const c=S.coins.find(x=>x.id===d.id); if(!c) return `<div class="shead"><div class="wrap">${backBtn()}</div></div>`;
+  const t=themeOf(c), ph=photoOrder(c); if(d.sel==null||d.sel>=ph.length) d.sel=0; const p=ph[d.sel], cv=coverOf(c);
+  const todo=todoOf(c), pa=priceAUD(c);
+  const stage=p?`<div class="stage ${p.mine?"mine":"ref"}">${imgTag(p,'data-zoom')}${p.mine?`<span class="mybadge"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5 9-10"/></svg>MY COIN · ${esc(p.side||"")}</span>`:`<span class="sidetag">${esc(p.side||"")}</span><div class="refbanner">REFERENCE · ${esc(p.source||"Other")} — not your coin</div>`}
+      <button type="button" class="coverbtn" data-cover="${esc(p.id)}" aria-pressed="${p===cv}"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="${p===cv?"#111827":"none"}" stroke="#111827" stroke-width="2" stroke-linejoin="round"><path d="m12 3 2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z"/></svg>${p===cv?"Cover photo":"Make cover"}</button></div>`
+    :`<div class="stage" style="flex-direction:column;gap:10px"><div class="face" style="--face:150px;width:150px;height:150px">${drawnCoin(c)}</div><span class="muted small">No photos yet</span></div>`;
+  const thumbs=`<div class="thumbs">${ph.map((q,i)=>`<div class="th ${q.mine?"mine":"ref"} ${i===d.sel?"sel":""}"><button type="button" data-sel="${i}" aria-label="${q.mine?"My photo":"Reference photo"}, ${esc(q.side||"")}">${imgTag(q)}${q.mine?"":`<span class="rb">REF · ${esc(shortSrc(q.source))}</span>`}</button>${q===cv?`<span class="star" aria-label="Cover photo"><svg width="12" height="12" viewBox="0 0 24 24" fill="#111827"><path d="m12 3 2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z"/></svg></span>`:""}</div>`).join("")}<button type="button" class="addph" data-addphoto="${c.id}" aria-label="Add photos"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button></div>`;
+  const ns=c.ns;
+  const issues=ns&&(ns.issues||[]).length>1?ns.issues:null;
+  return `<div class="shead"><div class="wrap">${backBtn("Back")}<span style="flex:1"></span>${S.readOnly?"":`<button type="button" class="btn sm light" data-edit="${c.id}">Edit</button>`}</div></div>
+  <div class="dhero"><div class="wrap">
+    <div class="row" style="gap:6px">${c.denom?`<span class="pill" style="background:${t.solid};color:#fff">${esc(c.denom)}</span>`:""}${gradeText(c)?`<span class="pill" style="${gradeStyle(c.grade)}">${esc(gradeText(c))}</span>`:""}${c.colourised?`<span class="pill" style="background:#FDE68A;color:#78350F">Coloured</span>`:""}${c.isSet?`<span class="pill" style="background:#E0E7FF;color:#3730A3">Set${c.setCount?" of "+esc(c.setCount):""}</span>`:""}${qtyOf(c)>1?`<span class="pill" style="background:#fff;color:#111827">×${qtyOf(c)}</span>`:""}${!isOwned(c)?`<span class="pill" style="background:#FEE2E2;color:#991B1B">${esc(c.status)}</span>`:""}</div>
+    <h1>${esc(titleOf(c))}</h1><div class="sub">${esc([c.country||"",collOf(c),c.mint&&c.mint!=="None"?"Mint mark "+c.mint:c.mint==="None"?"No mint mark":""].filter(Boolean).join(" · "))}</div></div></div>
+  <div class="wrap sbody">
+    ${todo.length&&!S.readOnly?`<div class="todo"><span><b>To finish:</b> ${esc(todo.join(", "))}</span><button type="button" class="btn sm" data-edit="${c.id}">Add</button></div>`:""}
+    <section class="card" style="padding:14px">${stage}${thumbs}<p class="m0 muted small">Tap a photo to view it; tap the big photo to zoom. The star picks the photo shown in your coin list.</p></section>
+    ${c.storage?`<div class="todo" style="background:#EDE9FE"><span class="ico" style="background:#7C3AED"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"><path d="M12 21s-7-6.2-7-11a7 7 0 0 1 14 0c0 4.8-7 11-7 11z"/><circle cx="12" cy="10" r="2.5"/></svg></span><span><b>Kept in:</b> ${esc(c.storage)}</span></div>`:""}
+    ${cardH("Identity","#4338CA",'<circle cx="12" cy="12" r="8"/><path d="M9 12h6"/>',kv("Denomination",c.denom)+kv("Year",c.year)+kv("Mint / privy mark",c.mint)+kv("Theme / series",c.series)+kv("Country",c.country)+kv("Variety / error",c.variety)+(c.isSet?kv("Coins in set",String(setSize(c)))+kv("Notes about the set",c.setContents):""))}
+    ${cardH("Design","#DB2777",'<path d="M12 3l2.5 5.5L20 9l-4 4 1 6-5-3-5 3 1-6-4-4 5.5-.5z"/>',kv("Effigy",c.effigy)+kv("Reverse designer",c.reverseDesigner)+(c.colourised!=null?kv("Colourised",c.colourised?"Yes":"No"):""))}
+    ${cardH("Condition","#2563EB",'<path d="M4 18h16M7 14l3-4 3 3 4-6"/>',kvH("Grade",gradeText(c)?`<span class="grade" style="${gradeStyle(c.grade)}">${esc(gradeText(c))}${GRADE_NAMES[c.grade]?" · "+esc(GRADE_NAMES[c.grade]):""}</span> ${infoBtn("grades")}`:"")+kv("Finish",c.finish)+kv("Packaging",c.packaging)+kv("Serial / certificate no.",c.serial))}
+    ${cardH("Specifications","#0D9488",'<path d="M12 3v18M3 12h18"/>',kv("Composition",c.composition)+kv("Mass",unit(c.mass,"g"))+kv("Diameter",unit(c.diameter,"mm"))+kv("Thickness",unit(c.thickness,"mm"))+kv("Edge",c.edge)+kvH("Mintage",blank(c.mintage)?"":`${esc(fmtNum(c.mintage))}${+c.mintage&&+c.mintage<=50000?` <span class="grade" style="background:#FEF3C7;color:#92400E">Low mintage</span>`:""}`)+(!ns&&!c.isSet&&nsKey()&&!S.readOnly?`<div class="nsbar"><span>Not linked to Numista yet</span><button type="button" class="btn sm" style="background:#0D9488;border-color:#0D9488;color:#fff" data-nsfind="${c.id}">Find in Numista</button></div>`:"")+(ns?`<div class="nsbar"><span>Catalogue data provided by Numista · <a href="${esc(ns.url)}" target="_blank" rel="noopener">N# ${esc(ns.id)}</a>${ns.refs?" · "+esc(ns.refs):""}</span>${nsKey()&&!S.readOnly?`<button type="button" class="btn sm" style="background:#0D9488;border-color:#0D9488;color:#fff" data-nsrefresh="${c.id}">Refresh</button>`:""}</div>`:""))}
+    ${cardH("Ownership","#D97706",'<path d="M4 7h16v12H4z"/><path d="M4 11h16"/>',kv("Quantity",qtyOf(c)>1?String(qtyOf(c)):"")+kv("How acquired",c.acqHow)+kv("Date acquired",fmtDate(c.acqDate))+kv("Source",c.source)+kv("Price paid (each)",blank(c.price)?"":(curOf(c.priceCur)==="AUD"?aud(c.price):`${fmtMoney(c.price,c.priceCur)}${pa!=null?" ("+aud(pa)+")":" (AUD pending)"}`))+(postageEach(c)>0?kv("Postage share (each)",aud(Math.round(postageEach(c)*100)/100))+(costEach(c)!=null?kvH("Total cost (each)",`<b>${esc(aud(costEach(c)))}</b>`):""):"")+kvH("Current value (each)",blank(c.value)?"":`${esc(aud(c.value))}${gainPill(c)}${c.valueDate?`<br><span class="muted small">as at ${esc(fmtDate(c.valueDate))}</span>`:""}`)+kv("Status",isOwned(c)?"":c.status))}
+    ${setCard(c)}${rcCard(c)}
+    ${issues?`<section class="card"><h3><span class="ico" style="background:#0F766E"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M3 9h18M8 2v4M16 2v4"/></svg></span>All years of this type<span class="sp"></span><span class="muted small">${issues.filter(i=>ownsIssue(ns.id,i)).length}/${issues.length}</span></h3><div class="chips wrapy" style="padding-bottom:14px">${issues.map(i=>{ const o=ownsIssue(ns.id,i); return `<span class="chip" style="${o?"background:#DDF5F2;border-color:#0D9488;color:#115E59":""}">${o?"✓ ":""}${esc(i.year)}${i.mint?" "+esc(i.mint):""}${i.mintage?` <span class="muted" style="font-weight:600">· ${esc(fmtNum(i.mintage))}</span>`:""}</span>`; }).join("")}</div></section>`:""}
+    ${c.history?`<section class="card"><h3><span class="ico" style="background:#7C3AED"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M5 4h11l3 3v13H5z"/><path d="M9 10h6M9 14h6"/></svg></span>Historical context</h3><p class="story">${esc(c.history)}</p></section>`:""}
+    ${c.notes?`<section class="card"><h3><span class="ico" style="background:#475569"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4 20h4L19 9l-4-4L4 16z"/></svg></span>Notes</h3><p class="story">${esc(c.notes)}</p></section>`:""}
+    ${S.readOnly?"":`<div class="row" style="justify-content:center;margin-top:6px"><button type="button" class="btn" data-dup="${c.id}">Duplicate as new</button><button type="button" class="btn" data-sold="${c.id}">${isOwned(c)?"Mark as sold":"Back in collection"}</button><button type="button" class="btn danger" data-delcoin="${c.id}">${d.confirmDel?"Tap again to delete":"Delete"}</button></div>`}
+    <p class="muted small" style="text-align:center;margin:0">Added ${fmtDate((c.addedAt||"").slice(0,10))||"—"}${c.updatedAt?` · updated ${fmtWhen(c.updatedAt)}`:""}</p>
+  </div>`;
+}
+const shortSrc=s=>({"Royal Australian Mint":"RAM","Perth Mint":"Perth"}[s]||s||"Other");
+
+/* ---------- add: Numista search / manual / copy ---------- */
+function nsSearchBlock(d){ return `<form id="nsForm" class="searchbar" style="border:2px solid #4338CA"><label class="sr" for="nsq">Search Numista</label><input id="nsq" type="search" enterkeyhint="search" autocomplete="off" placeholder="e.g. 2022 2 dollars honey bee" value="${esc(d.q||"")}"><button class="btn sm primary" type="submit">Search</button></form>
+      <label class="check-inline"><input type="checkbox" id="nsAus" ${nsSet().ausOnly!==false?"checked":""}><span>Australian coins only</span></label>
+      ${d.busy?`<p class="muted m0">${esc(d.busy)}</p>`:""}${d.err?`<p class="warnTxt m0">${esc(d.err)}</p>`:""}${d.tried&&!d.busy&&!d.issues?`<p class="muted small m0">No exact match — showing results for "${esc(d.tried)}".</p>`:""}
+      ${d.issues?issuePicker(d):d.results?(d.results.length?`<div class="listbox">${d.results.map(r=>`<button type="button" class="nsres" data-nspick="${r.id}">${(r.reverse_thumbnail||r.obverse_thumbnail)?`<img src="${esc(r.reverse_thumbnail||r.obverse_thumbnail)}" alt="" referrerpolicy="no-referrer">`:`<span class="face" style="--face:48px;width:48px;height:48px"><span class="coin m-silver">?</span></span>`}<span class="tx"><b>${esc(r.title)}</b><span>${esc([r.issuer&&r.issuer.name,r.min_year===r.max_year?r.min_year:`${r.min_year||"?"}–${r.max_year||"?"}`,"N# "+r.id].filter(Boolean).join(" · "))}</span></span></button>`).join("")}<p class="m0 muted small" style="padding:8px 14px">Source: Numista</p></div>`:`<p class="muted m0">Nothing found — try fewer words, e.g. "2 dollars 2022".</p>`):`<p class="muted small m0">Tip: type the year, value and a word from the design. Picking a match fills in the specifications and reference photos.</p>`}`
+; }
+const NS_SETUP=`<div class="panel"><p class="m0">Add your free Numista API key and MyMint fills in composition, mass, diameter, mintage, designers and reference photos for you.</p><button type="button" class="btn primary" data-more-go="numista">Set up Numista</button></div>`;
+function addHTML(d){
+  const key=nsKey();
+  return `<div class="shead"><div class="wrap">${backBtn("Cancel")}<h2>Add a coin</h2></div></div>
+  <div class="wrap sbody">
+    <div class="step"><i style="background:#4338CA">1</i><h2>Find it in the Numista catalogue</h2></div>
+    ${key?nsSearchBlock(d):NS_SETUP}
+    <div class="step" style="margin-top:6px"><i style="background:#D97706">2</i><h2>Or start another way</h2></div>
+    <div class="row"><button type="button" class="btn" data-manual>Enter manually</button><button type="button" class="btn" data-copyfrom>${d.copy?"Hide":"Copy an existing coin"}</button></div>
+    ${d.copy?`<div class="field"><label for="cpq">Find the coin to copy</label><input id="cpq" type="search" value="${esc(d.cq||"")}" placeholder="e.g. 2021 $2"></div><div class="listbox" id="cpList">${copyList(d.cq||"")}</div>`:""}
+  </div>`;
+}
+function nsfindHTML(d){
+  const c=d.target.draft;
+  return `<div class="shead"><div class="wrap">${backBtn("Back")}<h2>Find in Numista</h2></div></div>
+  <div class="wrap sbody">
+    <div class="todo" style="background:#DDF5F2"><span><b>${esc(titleOf(c))}</b><br><span class="muted">Pick the matching coin. Only empty details are filled in — anything you've entered is kept.</span></span></div>
+    ${nsKey()?nsSearchBlock(d):NS_SETUP}
+  </div>`;
+}
+function nsQueryFor(c){
+  const dq=c.denom?(c.denom.match(/^\$(\d+)/)?`${RegExp.$1} dollar${RegExp.$1==="1"?"":"s"}`:c.denom.match(/^(\d+)c$/)?`${RegExp.$1} cents`:c.denom):"";
+  let words=c.series||titleOf(c);
+  words=words.replace(/\b(19|20)\d\d(\s*[-–]\s*(19|20)\d\d)?\b/g," ").replace(/\$\d+|\b\d+c\b/gi," ").replace(/\b(uncirculated|circulating|circulated|coloured|colour|color|coin|coins|card|ram|dcpl|on|in|the|of|and|al-br|frosted|silver|set|collection|privy|mark|four|seven|\d+-coin|volume|1|anniversary|australian|australia|end|50th|centenary|commemorative)\b/gi," ").replace(/[–\-:()]/g," ").replace(/\s+/g," ").trim();
+  return [yearNum(c)||"",dq,words].filter(Boolean).join(" ");
+}
+async function nsLink(d,issue){
+  const t=d.type, tgt=d.target, c=tgt.draft; d.busy="Filling in details and reference photos…"; d.issues=null; drawTop();
+  applyNs(c,fromNumista(t,issue),false); c.ns=nsInfo(t,d.typeIssues);
+  if(!(c.photos||[]).some(p=>!p.mine&&p.source==="Numista")){ c.photos=c.photos||[];
+    for(const [side,obj] of [["Obverse",t.obverse],["Reverse",t.reverse]]){ const pic=obj&&(obj.picture||obj.thumbnail); if(!pic) continue; const r=await nsImage(pic); if(!r) continue; if(!r.url) tgt.newFiles.push(r.id); c.photos.push({id:r.id,url:r.url,mine:false,side,source:"Numista",link:c.ns.url}); } }
+  d.busy=""; await popView(); toast("Filled from Numista — check the details, then Save");
+}
+function copyList(q){ const l=sorted(S.coins.filter(c=>matchQuery(c,q)).slice()).slice(0,40); return l.length?l.map(c=>`<button type="button" class="lrow" data-copy="${c.id}">${faceHTML(c)}<span class="tx"><span class="t1">${esc(titleOf(c))}</span><span class="t2">Copies the coin details, not the photos or purchase</span></span></button>`).join(""):`<p class="muted small" style="padding:12px">No coins match.</p>`; }
+function issuePicker(d){ return `<div class="panel"><h3>${esc(d.type.title)}</h3><p class="m0 muted small">Which year and mint mark is yours?</p><div class="pick">${d.issues.map((i,k)=>`<button type="button" data-issue="${k}">${esc(i.year!=null?i.year:i.gregorian_year)}${i.mint_letter?" "+esc(i.mint_letter):""}${i.mintage?` <span style="font-weight:500;opacity:.8">· ${esc(fmtNum(i.mintage))}</span>`:""}</button>`).join("")}</div><button type="button" class="btn ghost" data-issue="-1">Not sure — choose later</button></div>`; }
+function nsAttempts(q){
+  const yrs=(q.match(/\b(19|20)\d\d\b/g)||[]); const noY=q.replace(/\b(19|20)\d\d\b/g," ").replace(/\s+/g," ").trim();
+  const dm=noY.match(/^\d+\s+(dollars?|cents?)\b/i); const dq=dm?dm[0]:""; const words=(dm?noY.slice(dm[0].length):noY).trim().split(" ").filter(w=>w.length>2);
+  const longest=words.slice().sort((a,b)=>b.length-a.length)[0]||"";
+  const list=[q,noY,[dq,...words.slice(-2)].join(" ").trim(),[dq,longest].join(" ").trim(),words.slice(-2).join(" "),longest];
+  return {list:[...new Set(list.map(x=>x.trim()).filter(Boolean))],year:yrs[0]?+yrs[0]:null};
+}
+async function nsAusCode(){
+  if(S.meta.nsAus!==undefined) return S.meta.nsAus;
+  let code=null;
+  try{ const j=await nsFetch(`/issuers`); const list=asList(j.issuers?j.issuers:j); const hit=list.find(i=>/^australia$/i.test((i.name||"").trim()))||list.find(i=>/^australia\b/i.test((i.name||"").trim())&&!/state|colony|territor|antarctic/i.test(i.name||"")); code=hit?hit.code:null; }catch(e){ if(/key|limit|connection|reach/i.test(e.message)) throw e; }
+  S.meta.nsAus=code; saveMeta().catch(()=>{}); return code;
+}
+async function nsQuery(q,aus){
+  let list=null;
+  const code=aus?await nsAusCode():null;
+  if(code){ try{ list=(await nsFetch(`/types?q=${encodeURIComponent(q)}&category=coin&count=50&issuer=${encodeURIComponent(code)}`)).types||[]; }catch(e){ if(/key|limit|connection|reach/i.test(e.message)) throw e; if(e.status===400){ S.meta.nsAus=null; saveMeta().catch(()=>{}); } list=null; } }
+  if(!list||!list.length){ list=(await nsFetch(`/types?q=${encodeURIComponent(q)}&category=coin&count=50`)).types||[]; if(aus){ const au=list.filter(r=>/australia/i.test((r.issuer&&r.issuer.name)||"")); list=au; } }
+  return list;
+}
+async function nsSearch(d){
+  const q=(d.q||"").trim(); if(!q) return; d.busy="Searching Numista…"; d.err=""; d.issues=null; d.tried=null; drawTop();
+  try{ const aus=nsSet().ausOnly!==false; const {list:tries,year}=nsAttempts(q); let res=[], used=q;
+    for(const t of tries.slice(0,4)){ res=await nsQuery(t,aus); used=t; if(res.length) break; }
+    if(year) res.sort((a,b)=>{ const ina=(a.min_year||0)<=year&&year<=(a.max_year||9999), inb=(b.min_year||0)<=year&&year<=(b.max_year||9999); return inb-ina; });
+    d.results=res; if(used!==q&&res.length) d.tried=used; }
+  catch(e){ d.err=e.message||String(e); d.results=null; }
+  d.busy=""; if(topV()===d) drawTop();
+}
+async function nsPick(d,id){
+  d.busy="Getting details from Numista…"; d.err=""; drawTop();
+  try{ const t=await nsFetch(`/types/${id}`); let issues=[]; try{ issues=asList(await nsFetch(`/types/${id}/issues`)); }catch{}
+    d.type=t; d.typeIssues=issues||[]; d.busy="";
+    if(d.kind==="setfind"){ const y=String(yearNum(d.target.draft)||""); if((issues||[]).length>1){ const hits=issues.filter(i=>String(i.year!=null?i.year:i.gregorian_year)===y); if(hits.length===1){ await siLink(d,hits[0]); return; } d.issues=issues; drawTop(); return; } await siLink(d,(issues||[])[0]||null); return; }
+    if(d.kind==="nsfind"&&(issues||[]).length){ const c=d.target.draft, y=String(yearNum(c)||""), m=(c.mint&&c.mint!=="None"&&c.mint!=="Privy mark")?c.mint:null;
+      let hits=issues.filter(i=>String(i.year!=null?i.year:i.gregorian_year)===y); if(m) hits=hits.filter(i=>(i.mint_letter||"")===m); else if(c.mint==="None") hits=hits.filter(i=>!i.mint_letter);
+      if(hits.length===1){ await nsLink(d,hits[0]); return; } }
+    if((issues||[]).length>1){ d.issues=issues; drawTop(); return; }
+    if(d.kind==="nsfind"){ await nsLink(d,(issues||[])[0]||null); return; }
+    await nsBuild(d,(issues||[])[0]||null);
+  }catch(e){ d.busy=""; d.err=e.message||String(e); drawTop(); }
+}
+async function nsBuild(d,issue){
+  d.busy="Saving reference photos…"; d.issues=null; drawTop();
+  const t=d.type, draft=blankCoin(); applyNs(draft,fromNumista(t,issue),true); draft.ns=nsInfo(t,d.typeIssues);
+  const newFiles=[];
+  for(const [side,obj] of [["Obverse",t.obverse],["Reverse",t.reverse]]){ const pic=obj&&(obj.picture||obj.thumbnail); if(!pic) continue; const r=await nsImage(pic); if(!r) continue; if(!r.url) newFiles.push(r.id); draft.photos.push({id:r.id,url:r.url,mine:false,side,source:"Numista",link:draft.ns.url}); }
+  d.busy=""; replaceView({kind:"edit",id:null,draft,newFiles,removedFiles:[],fromNs:true});
 }
 
-// ---------- unsaved bill drafts (kept on this phone only, until saved or discarded) ----------
-const DRAFTS = new Map();
-const draftKey = (id) => 'bills-draft:' + (id || 'new');
-const editing = () => S.route.split('/')[0] === 'edit';
-function getDraft(id) {
-  const k = draftKey(id);
-  if (DRAFTS.has(k)) return DRAFTS.get(k);
-  try { const j = localStorage.getItem(k); return j ? JSON.parse(j) : null; } catch { return null; }
-}
-function clearDraft(id) { const k = draftKey(id); DRAFTS.delete(k); try { localStorage.removeItem(k); } catch {} }
-function saveDraft(form) {
-  const vals = {};
-  for (const el of form.elements) {
-    if (!el.name) continue;
-    if (el.type === 'radio') { if (el.checked) vals[el.name] = el.value; }
-    else if (el.type === 'checkbox') vals[el.name] = el.checked;
-    else vals[el.name] = el.value;
-  }
-  const incl = form.querySelector('[name=includeInTotals]');
-  const dr = { at: Date.now(), vals, inclAuto: incl ? incl.dataset.inclAuto : null };
-  const k = draftKey(form.dataset.id);
-  DRAFTS.set(k, dr);
-  try { localStorage.setItem(k, JSON.stringify(dr)); } catch {}
-}
-function applyDraft(form, dr) {
-  const v = dr.vals || {};
-  for (const el of form.elements) {
-    if (!el.name || !(el.name in v)) { if (el.type === 'radio' && el.name in v) el.checked = false; continue; }
-    if (el.type === 'radio') el.checked = v[el.name] === el.value;
-    else if (el.type === 'checkbox') el.checked = !!v[el.name];
-    else el.value = v[el.name];
-  }
-  const incl = form.querySelector('[name=includeInTotals]');
-  if (incl && dr.inclAuto) incl.dataset.inclAuto = dr.inclAuto;
-  const amt = form.querySelector('[name=amount]'), af = document.getElementById('amtfrom');
-  if (amt && af && amt.dataset.cur !== undefined) af.hidden = amt.value === '' || Number(amt.value) === Number(amt.dataset.cur);
-}
-
-// ---------- small builders ----------
-const amt = (b, v) => (v === null || v === undefined ? h`<span class="muted">—</span>` : h`${C.isEstimate(b) ? '≈' : ''}${C.money(v)}`);
-const dotFor = (b) => h`<span class="dot" style="background:${C.typeColor(doc(), b)}"></span>`;
-function back(href, title, sub) {
-  return h`<div class="top no-print"><a class="back" href="${href}" aria-label="Back">${icon('back')}</a><div class="grow"><h1 style="font-size:22px">${title}</h1>${sub ? h`<div class="xs muted">${sub}</div>` : ''}</div>${syncDot()}</div>`;
-}
-function head(title, extra) {
-  return h`<div class="between"><div class="stack" style="gap:2px"><div class="small muted">${C.fmtLong(today())}</div><h1>${title}</h1></div><div class="row" style="gap:8px">${syncDot()}${extra || ''}</div></div>`;
-}
-function weekendNote(b, due) { return C.isWeekend(due) && b.payMethod !== 'manual' ? ' · may come out ' + C.fmtDate(C.nextWeekday(due)) : ''; }
-function stateCell(i) {
-  const b = i.bill;
-  if (i.state === 'paid') return C.paymentFor(doc(), b.id, i.due) ? h`<button class="pill green" data-act="payedit" data-bill="${b.id}" data-due="${i.due}" style="border:0">Paid ✓</button>` : h`<span class="pill green">Paid ✓</span>`;
-  if (i.state === 'scheduled') return h`<button class="pill blue" data-act="payedit" data-bill="${b.id}" data-due="${i.due}" style="border:0">Scheduled ${C.fmtDate(C.paymentFor(doc(), b.id, i.due).date, { dow: false })}</button>`;
-  if (i.state === 'missed') return h`<span class="pill red">Didn’t come out</span>`;
-  if (b.payMethod === 'manual') return h`<button class="tick ${''}" data-act="pay" data-bill="${b.id}" data-due="${i.due}" aria-label="Mark ${b.name} paid">${icon('check', 18, 2.4)}</button>`;
-  if (b.payMethod === 'rent') return h`<span class="pill grey">From rent</span>`;
-  return h`<span class="pill grey">Direct debit</span>`;
-}
-function billRow(i, opts = {}) {
-  const b = i.bill;
-  const acc = b.accountId ? C.accountName(doc(), b.accountId) : (b.payMethod === 'rent' ? 'Taken from rent' : '');
-  const sub = opts.sub || [acc, b.freq].filter(Boolean).join(' · ') + weekendNote(b, i.due);
-  return h`<div class="item ${C.settled(i.state) ? 'done' : ''}">${dotFor(b)}<a class="grow stack" style="gap:2px;color:inherit" href="#/bill/${b.id}"><span class="t">${b.name}</span><span class="s">${sub}</span></a><span class="stack" style="gap:4px;align-items:flex-end"><span class="amt">${amt(b, i.amount)}</span>${opts.noState ? '' : stateCell(i)}</span></div>`;
-}
-function relPill(n) {
-  const cls = n < 0 ? 'red' : n <= 3 ? 'red' : n <= 7 ? 'amber' : 'blue';
-  return h`<span class="pill ${cls}">${C.relDays(n)}</span>`;
-}
-function emptyCard(text) { return h`<div class="card"><div class="empty">${text}</div></div>`; }
-
-// ---------- screens ----------
-function scrUpcoming() {
-  const d = doc(), t = today(), range = S.ui.range;
-  if (!C.liveBills(d).length) return h`${head('Upcoming')}<div class="card pad stack"><h3>No bills yet</h3><div class="small muted">Import the file made from your spreadsheet, join Lyndsey's copy, or add bills by hand.</div><a class="btn" href="#/setup">Get started</a></div>`;
-  const end = C.addDays(t, range);
-  const all = C.schedule(d, t, end, t, (b) => b.status === 'active');
-  const hh = all.filter((i) => C.inTotals(i.bill));
-  const total = C.sumAmounts(hh);
-  const nextPay = C.paydays(d.settings, t, C.addDays(t, 14))[0];
-  const byAcc = new Map();
-  for (const i of all) {
-    if (i.state !== 'due' || i.bill.payMethod === 'rent' || !i.bill.accountId) continue;
-    byAcc.set(i.bill.accountId, C.round2((byAcc.get(i.bill.accountId) || 0) + (i.amount || 0)));
-  }
-  const trs = C.transfers(d, t, C.addDays(t, 1), t);
-  const manual = C.schedule(d, C.addDays(t, -60), C.addDays(t, 30), t, (b) => b.status === 'active' && b.payMethod === 'manual' && b.kind !== 'reminder').filter((i) => i.state === 'due' || i.state === 'overdue');
-  const others = C.schedule(d, C.addDays(t, -60), C.addDays(t, 30), t, (b) => b.status === 'active' && b.kind === 'reminder').filter((i) => i.state === 'due' || i.state === 'overdue');
-  const inv = all.filter((i) => i.group === 'investment');
-  const fu = C.followUps(d, t);
-  const days = new Map();
-  for (const i of hh) { if (!days.has(i.due)) days.set(i.due, []); days.get(i.due).push(i); }
-  const pending = (d.settings.payCheckPending || []).length;
-  return h`
-  ${head('Upcoming', h`<a class="icon-btn" href="#/reports" aria-label="Reports">${icon('chart')}</a><a class="icon-btn brand" href="#/edit/new" aria-label="Add a bill">${icon('plus')}</a>`)}
-  ${!DB.isOn(S.dev) ? h`<a class="banner amber row" href="#/sync" style="color:inherit">${icon('warn', 20)}<span class="grow">Your bills aren't in Dropbox yet. <b>Connect Dropbox</b> so clearing Chrome can't lose them.</span>${icon('next', 18)}</a>` : S.dbx === 'error' ? h`<a class="banner red row" href="#/sync" style="color:inherit">${icon('warn', 20)}<span class="grow">Dropbox backup problem: ${S.dbxErr}</span>${icon('next', 18)}</a>` : ''}
-  ${pending ? h`<a class="banner amber row" href="#/checkpay" style="color:inherit">${icon('warn', 20)}<span class="grow">Confirm how <b>${pending}</b> imported bills are paid (direct debit or you pay them).</span>${icon('next', 18)}</a>` : ''}
-  <section class="hero" aria-label="Summary">
-    <div class="seg" role="group" aria-label="Range"><button data-act="range" data-v="7" aria-pressed="${range === 7}">Next 7 days</button><button data-act="range" data-v="30" aria-pressed="${range === 30}">Next 30 days</button></div>
-    <div class="stack" style="gap:2px"><div class="sub" style="color:#B9D3CC;font-size:13px">Household bills due in the next ${range} days</div><div class="big">${C.money(total)}</div>
-    <div class="sub">${hh.length} payment${hh.length === 1 ? '' : 's'}${nextPay ? ' · next payday ' + C.fmtDate(nextPay) : ''}</div></div>
-    ${byAcc.size ? h`<hr><div class="xs" style="font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:#9FC3BA">Needed in each account (all bills)</div>
-    ${[...byAcc.entries()].map(([id, v]) => h`<div class="between" style="font-size:15px"><span>${C.accountName(d, id)}</span><span class="mono">${C.money(v)}</span></div>`)}` : ''}
+/* ---------- edit form ---------- */
+function blankCoin(){ return {country:"Australia",priceCur:"AUD",qty:1,status:"In collection",photos:[],acqDate:todayISO()}; }
+function datalists(){ const vals=k=>[...new Set(S.coins.map(c=>c[k]).concat(S.wanted.map(w=>w[k])).filter(v=>!blank(v)))].sort();
+  return ["series","effigy","reverseDesigner","source","storage","country","composition","edge"].map(k=>`<datalist id="dl_${k}">${vals(k).map(v=>`<option value="${esc(v)}">`).join("")}</datalist>`).join("")+`<datalist id="dl_mint">${MINTS.map(m=>`<option value="${m}">`).join("")}</datalist>`; }
+function pick(field,opts,cur,labels,scroll){ return `<div class="pick ${scroll?"scroll":""}" role="group">${opts.map((o,i)=>`<button type="button" data-pk="${field}" data-pv="${esc(o)}" aria-pressed="${String(cur)===String(o)}">${esc(labels?labels[i]:o)}</button>`).join("")}</div>`; }
+function inp(field,label,draft,o={}){ return `<div class="field ${o.full?"full":""}"><label for="f_${field}">${esc(label)}${o.info?" "+infoBtn(o.info):""}${o.hint?` <span class="hint">${esc(o.hint)}</span>`:""}</label>${o.area?`<textarea id="f_${field}" data-f="${field}" placeholder="${esc(o.ph||"")}">${esc(draft[field]||"")}</textarea>`:`<input id="f_${field}" data-f="${field}" value="${esc(draft[field]??"")}" ${o.list?`list="dl_${o.list}"`:""} ${o.num?`inputmode="${o.num}"`:""} ${o.type?`type="${o.type}"`:""} placeholder="${esc(o.ph||"")}" autocomplete="off">`}</div>`; }
+function editHTML(d){
+  const c=d.draft, isNew=!d.id, specN=["composition","mass","diameter","thickness","edge","mintage"].filter(k=>!blank(c[k])).length, desN=["effigy","reverseDesigner","variety"].filter(k=>!blank(c[k])).length;
+  return `<div class="shead"><div class="wrap">${backBtn("Cancel")}<h2>${isNew?"New coin":"Edit coin"}</h2><button type="button" class="btn sm amber" data-save>Save</button></div></div>
+  <div class="wrap sbody">${datalists()}
+  ${c.isSet&&!c.ns?"":c.ns?`<div class="nsbar" style="margin:0"><span>Linked to Numista · N# ${esc(c.ns.id)}. Check the details and add your own below.</span>${nsKey()?`<button type="button" class="btn sm" data-nsfind="edit">Change</button>`:""}</div>`:nsKey()?`<div class="nsbar" style="margin:0"><span>Not linked to Numista yet — find it to fill in specs, designers, mintage and reference photos.</span><button type="button" class="btn sm" style="background:#0D9488;border-color:#0D9488;color:#fff" data-nsfind="edit">Find in Numista</button></div>`:""}
+  <section class="fsec"><h3><span class="ico" style="background:#4338CA"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="8"/></svg></span>The coin</h3>
+    <div class="field"><span class="flabel">Denomination</span>${pick("denom",DENOMS.map(d=>d.k),c.denom,null,true)}</div>
+    <div class="grid2">${inp("year","Year",c,{num:"numeric",ph:"e.g. 2022"})}${inp("mint","Mint / privy mark",c,{list:"mint",ph:"C, S, None…",info:"marks"})}</div>
+    ${inp("series","Theme / series",c,{list:"series",ph:"e.g. Australian Dinosaurs",hint:"groups coins into albums"})}
+    ${inp("title","Name",c,{ph:autoTitle(c)||"e.g. 2022 $2 Honey Bee",hint:"leave blank to use year, value and series"})}
+    <div class="field"><span class="flabel">Coloured coin?</span>${pick("colourised",["yes","no"],c.colourised===true?"yes":c.colourised===false?"no":"",["Coloured","Not coloured"])}</div>
+    <label class="check-inline"><input type="checkbox" id="f_isSet" ${c.isSet?"checked":""}><span>This is a set of several coins (e.g. a 4-coin collection)</span></label>
+    <div id="setFields" class="setbox" ${c.isSet?"":"hidden"}>${setSec(d)}</div>
   </section>
-  ${trs.map((tr) => h`<div class="card pad row">${raw('<span class="icon-btn" style="width:40px;height:40px;background:var(--brand-soft);color:var(--brand);border:0">')}${icon('swap', 18)}${raw('</span>')}
-    <a class="grow stack" href="#/transfers" style="gap:2px;color:inherit"><b>${tr.date === t ? 'Today' : 'Tomorrow'}: savings → personal ${C.money(tr.total)}</b><span class="small muted">${tr.items.map((i) => i.bill.name).join(' · ')}${tr.check ? ' · ticked by ' + tr.check.by : ''}</span></a>
-    <button class="tick ${tr.check ? 'on' : ''}" data-act="trtick" data-date="${tr.date}" aria-label="Transfer done">${icon('check', 18, 2.4)}</button></div>`)}
-  ${manual.length ? h`<div class="card" style="border:1.5px solid var(--amber)"><div class="between" style="padding:14px 16px 6px"><span class="stack" style="gap:2px"><h3>You pay these yourself</h3><span class="xs muted">Not direct debit · alerts repeat until ticked</span></span></div>
-    <div class="list">${manual.map((i) => billRow(i, { sub: (i.state === 'overdue' ? 'Overdue — was due ' : 'Due ') + C.fmtDate(i.due) + ' · ' + C.relDays(C.daysBetween(t, i.due)).toLowerCase() + (i.bill.bpay && i.bill.bpay.biller ? ' · BPAY ' + i.bill.bpay.biller : '') }))}</div></div>` : ''}
-  ${others.length ? h`<div class="card dashed"><div style="padding:14px 16px 6px"><div class="eyebrow" style="padding:0">Reminder only · not in your totals</div></div>
-    <div class="list">${others.map((i) => billRow(i, { sub: (byIdName(d.others, i.bill.forWhom) || 'Someone else') + ' · ' + (i.state === 'overdue' ? 'overdue — was due ' : 'due ') + C.fmtDate(i.due) }))}</div></div>` : ''}
-  ${inv.length ? h`<div class="card inv"><div class="between" style="padding:14px 16px 6px"><span class="stack" style="gap:2px"><h3>Investment properties</h3><span class="xs" style="color:var(--inv-ink);font-weight:600">Not included in household totals · ${inv.length} payment${inv.length > 1 ? 's' : ''}</span></span><span class="mono">${C.money(C.sumAmounts(inv))}</span></div>
-    <div class="list">${inv.map((i) => billRow(i, { sub: C.fmtDate(i.due) + ' · ' + (propName(i.bill) || 'Across the portfolio') }))}</div></div>` : ''}
-  ${fu.length ? h`<div class="card"><div class="between" style="padding:14px 16px 8px"><h3>Needs attention</h3><a class="pill red" href="#/attention">${fu.length}</a></div><div class="list">
-    ${fu.slice(0, 4).map((f) => h`<a class="item" href="#/bill/${f.bill.id}"><span class="pill ${f.p === 1 ? 'solid-red' : f.p === 2 ? 'amber' : 'grey'}">${f.p === 1 ? 'HIGH' : f.p === 2 ? 'MED' : 'LOW'}</span><span class="grow stack" style="gap:2px"><span class="t" style="font-weight:600">${f.bill.name}</span><span class="s">${f.text}</span></span>${icon('next', 18)}</a>`)}
-    ${fu.length > 4 ? h`<a class="item" href="#/attention" style="justify-content:center;color:var(--brand);font-weight:600">See all ${fu.length}</a>` : ''}</div></div>` : ''}
-  <div class="between" style="padding:4px 2px 0"><h2>By day</h2><span class="small muted">Direct debits tick themselves</span></div>
-  ${days.size ? [...days.entries()].map(([dd, list]) => h`<div class="stack" style="gap:6px"><div class="between" style="padding:0 2px"><span class="row" style="gap:8px"><b style="font-size:15px">${C.fmtDate(dd)}</b>${relPill(C.daysBetween(t, dd))}</span><span class="mono small muted">${C.money(C.sumAmounts(list))}</span></div>
-    <div class="card list">${list.map((i) => billRow(i))}</div></div>`) : emptyCard('Nothing due in this period.')}
-  `;
-}
-function byIdName(list, id) { const x = C.byId(list, id); return x ? x.name : ''; }
-function propName(b) { const p = C.byId(doc().properties, b.propertyId); return p ? p.name : ''; }
-
-function scrAttention() {
-  const fu = C.followUps(doc(), today());
-  return h`${back('#/', 'Needs attention', fu.length + ' item' + (fu.length === 1 ? '' : 's') + ', highest first')}
-  <div class="card list">${fu.length ? fu.map((f) => h`<a class="item" href="#/bill/${f.bill.id}"><span class="pill ${f.p === 1 ? 'solid-red' : f.p === 2 ? 'amber' : 'grey'}">${f.p === 1 ? 'HIGH' : f.p === 2 ? 'MED' : 'LOW'}</span><span class="grow stack" style="gap:2px"><span class="t" style="font-weight:600">${f.bill.name}</span><span class="s">${f.text}</span></span></a>`) : h`<div class="empty">All clear.</div>`}</div>`;
-}
-
-function scrCalendar() {
-  const d = doc(), t = today();
-  const month = S.ui.calMonth || t.slice(0, 8) + '01';
-  const mEnd = C.addDays(C.addMonths(month, 1), -1);
-  const items = C.schedule(d, month, mEnd, t, (b) => b.status !== 'pending');
-  const hh = items.filter((i) => C.inTotals(i.bill));
-  const perDay = new Map();
-  for (const i of hh) perDay.set(i.due, (perDay.get(i.due) || 0) + (i.amount || 0));
-  const pds = new Set(C.paydays(d.settings, month, mEnd));
-  const sel = S.ui.calSel && S.ui.calSel >= month && S.ui.calSel <= mEnd ? S.ui.calSel : (t >= month && t <= mEnd ? t : month);
-  const lead = (C.dow(month) + 6) % 7;
-  const cells = [];
-  for (let k = 0; k < lead; k++) cells.push(h`<span></span>`);
-  for (let day = month; day <= mEnd; day = C.addDays(day, 1)) {
-    const v = perDay.get(day) || 0;
-    const lvl = v === 0 ? '' : v < 500 ? 'l1' : v <= 2000 ? 'l2' : 'l3';
-    const short = v === 0 ? '' : v >= 1000 ? '$' + (v / 1000).toFixed(1) + 'k' : '$' + Math.round(v);
-    cells.push(h`<button class="${lvl} ${day === sel ? 'sel' : ''} ${day === t ? 'today' : ''}" data-act="calsel" data-d="${day}" aria-label="${C.fmtDate(day)} ${short}${pds.has(day) ? ', payday' : ''}"><span class="d">${Number(day.slice(8))}</span><span class="a">${short}</span>${pds.has(day) ? h`<span class="p">PAY</span>` : ''}</button>`);
-  }
-  const dayItems = items.filter((i) => i.due === sel);
-  const excluded = items.filter((i) => !C.inTotals(i.bill));
-  const exGroups = {};
-  for (const i of excluded) { const g = i.group === 'investment' ? 'investment properties' : i.group === 'reminder' ? 'reminders for others' : 'not counted (e.g. kids’ savings)'; exGroups[g] = (exGroups[g] || 0) + (i.amount || 0); }
-  const annual = C.liveBills(d).filter((b) => C.inTotals(b) && b.status === 'active').reduce((a, b) => a + C.annualAmount(b, t, d), 0);
-  // pay fortnights overlapping this month
-  const periods = C.paydays(d.settings, C.addDays(month, -13), mEnd).map((p) => {
-    const e = C.addDays(p, 13);
-    const bills = C.sumAmounts(C.schedule(d, p, e, t, (b) => C.inTotals(b) && b.status !== 'pending'));
-    const pay = payIn(p);
-    return { p, e, bills, pay };
-  });
-  const maxB = Math.max(1, ...periods.map((x) => x.bills));
-  return h`${head('Calendar', h`<button class="icon-btn" data-act="calmonth" data-v="-1" aria-label="Previous month">${icon('back', 18)}</button><button class="icon-btn" data-act="calmonth" data-v="1" aria-label="Next month">${icon('next', 18)}</button>`)}
-  <div class="card pad stack">
-    <div class="between"><h2>${C.monthName(Number(month.slice(5, 7)) - 1)} ${month.slice(0, 4)}</h2><span class="mono" style="font-weight:600">${C.money(C.sumAmounts(hh))}</span></div>
-    <div class="between small muted"><span>${hh.length} household payments</span><span>Average month ${C.money(annual / 12)}</span></div>
-    ${Object.keys(exGroups).length ? h`<div class="xs" style="color:var(--inv-ink)">Not included: ${Object.entries(exGroups).map(([k, v]) => k + ' ' + C.money(v)).join(' · ')}</div>` : ''}
-    <div class="cal" style="margin-top:6px">${['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((x) => h`<span class="h">${x}</span>`)}${cells}</div>
-    <div class="row wrap xs muted" style="gap:6px 14px"><span class="row" style="gap:6px"><span class="dot" style="background:#E3ECF8"></span>Under $500</span><span class="row" style="gap:6px"><span class="dot" style="background:#B9CFEA"></span>$500–$2,000</span><span class="row" style="gap:6px"><span class="dot" style="background:#7EA6D6"></span>Over $2,000</span><span><b style="color:var(--brand)">PAY</b> payday</span></div>
+  <section class="fsec"><h3><span class="ico" style="background:#2563EB"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4 18h16M7 14l3-4 3 3 4-6"/></svg></span>Condition</h3>
+    <div class="field"><span class="flabel">Grade ${infoBtn("grades")}</span>${pick("grade",GRADES,c.grade)}<span class="hint" id="gradeHint">${c.grade?esc(GRADE_HINTS[c.grade]||""):"Not sure? Tap ? for what each grade looks like."}</span></div>
+    <div class="grid2">${inp("sheldon","Sheldon no.",c,{num:"numeric",ph:"1–70, optional"})}${inp("serial","Serial / cert. no.",c,{ph:"if it has one"})}</div>
+    <div class="field"><span class="flabel">Finish ${infoBtn("finish")}</span>${pick("finish",FINISHES,c.finish)}</div>
+    ${packField(d)}
+  </section>
+  <section class="fsec"><h3><span class="ico" style="background:#D97706"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M4 7h16v12H4z"/><path d="M4 11h16"/></svg></span>Ownership</h3>
+    <div class="field"><span class="flabel">How you got it</span>${pick("acqHow",HOWS,c.acqHow)}</div>
+    <div class="field"><span class="flabel">Quantity</span><div class="stepper"><button type="button" data-qty="-1" aria-label="One fewer">−</button><input id="f_qty" data-f="qty" inputmode="numeric" value="${esc(c.qty||1)}" aria-label="Quantity"><button type="button" data-qty="1" aria-label="One more">+</button></div></div>
+    <div class="field"><label for="f_acqDate">Date acquired</label><input id="f_acqDate" data-f="acqDate" type="date" value="${esc(c.acqDate||"")}"></div>
+    ${inp("source","Source",c,{list:"source",ph:"e.g. Royal Australian Mint, coin fair, change"})}
+    <div class="field"><label for="f_price">Price paid (each)</label><div class="inrow"><input id="f_price" data-f="price" inputmode="decimal" value="${esc(c.price??"")}" placeholder="0.00" style="flex:1"><select id="f_priceCur" data-f="priceCur" style="width:96px" aria-label="Currency">${CURRENCIES.map(x=>`<option ${curOf(c.priceCur)===x?"selected":""}>${x}</option>`).join("")}</select></div>${d.id&&postageEach(S.coins.find(x=>x.id===d.id)||{})>0?`<span class="hint">Plus ${esc(aud(Math.round(postageEach(S.coins.find(x=>x.id===d.id))*100)/100))} postage each from the receipt — counted in total cost.</span>`:""}<span class="hint" id="audNote">${curOf(c.priceCur)!=="AUD"?(c.priceAud!=null&&c.priceAud!==""?`About ${aud(c.priceAud)} — converted at the rate on the purchase date`:"Converted to AUD when you save (needs internet)"):""}</span></div>
+    ${inp("value","Current value each (A$)",c,{num:"decimal",ph:"your estimate"})}<div class="field"><label for="f_valueDate">Value as at</label><input id="f_valueDate" data-f="valueDate" type="date" value="${esc(c.valueDate||"")}"></div>
+    ${inp("storage","Storage location",c,{list:"storage",ph:"e.g. Safe, Album 1 page 3, Red box"})}
+    ${isNew?"":`<div class="field"><span class="flabel">Status</span>${pick("status",STATUSES,c.status||"In collection")}</div>`}
+  </section>
+  <section class="fsec" id="phSec">${photosSec(d)}</section>
+  <section class="fsec" id="rcSec">${rcSec(d)}</section>
+  <details class="fsec" ${specN?"":""}><summary><span class="ico" style="background:#0D9488"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 3v18M3 12h18"/></svg></span>Specifications<span class="sp"></span><span class="hint">${specN?specN+" filled":c.ns?"":"Numista fills these"}</span></summary>
+    <div class="grid2">${inp("country","Country",c,{list:"country"})}<div class="field"><span class="flabel">Collection</span>${pick("collection",COLLS,c.collection||"",null)}</div>
+    ${inp("composition","Composition",c,{list:"composition",full:true,ph:"e.g. Aluminium-bronze"})}${inp("mass","Mass (g)",c,{num:"decimal"})}${inp("diameter","Diameter (mm)",c,{num:"decimal"})}${inp("thickness","Thickness (mm)",c,{num:"decimal"})}${inp("mintage","Mintage",c,{num:"numeric"})}${inp("edge","Edge",c,{list:"edge",full:true,ph:"e.g. Reeded, Plain"})}</div></details>
+  <details class="fsec"><summary><span class="ico" style="background:#DB2777"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 3l2.5 5.5L20 9l-4 4 1 6-5-3-5 3 1-6-4-4 5.5-.5z"/></svg></span>Design<span class="sp"></span><span class="hint">${desN?desN+" filled":""}</span></summary>
+    ${inp("effigy","Effigy (portrait and designer)",c,{list:"effigy",ph:"e.g. Jody Clark 2019–2023"})}${inp("reverseDesigner","Reverse designer",c,{list:"reverseDesigner"})}${inp("variety","Variety / error",c,{ph:"if any"})}</details>
+  <details class="fsec" ${c.history||c.notes?"":""}><summary><span class="ico" style="background:#7C3AED"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M5 4h11l3 3v13H5z"/></svg></span>Story &amp; notes<span class="sp"></span><span class="hint">${[c.history?"context":"",c.notes?"notes":""].filter(Boolean).join(", ")}</span></summary>
+    ${inp("history","Historical context",c,{area:true,ph:"The background story of the coin"})}${inp("notes","Notes",c,{area:true,ph:"Your own remarks"})}</details>
+  <details class="fsec"><summary><span class="ico" style="background:#475569"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></span>Catalogue link<span class="sp"></span><span class="hint">${c.ns?"N# "+esc(c.ns.id):""}</span></summary>
+    ${nsKey()?`<button type="button" class="btn primary" data-nsfind="edit">Find in Numista</button><p class="m0 muted small">Or, if you already know its number:</p>`:""}<div class="field"><label for="f_nsid">Numista number (N#)</label><div class="inrow"><input id="f_nsid" inputmode="numeric" value="${esc(c.ns?c.ns.id:"")}" placeholder="e.g. 351234" style="flex:1">${nsKey()?`<button type="button" class="btn" data-nslink>Fill from Numista</button>`:""}</div><span class="hint">Fills empty fields only — anything you've typed is kept.</span></div></details>
+  ${!isNew?"":`<p class="muted small m0" style="text-align:center">Only the denomination or a name is needed to save — you can add the rest later.</p>`}
   </div>
-  <div class="stack" style="gap:6px"><div class="between" style="padding:0 2px"><h3>${C.fmtDate(sel)}${pds.has(sel) ? ' · payday' : ''}</h3><span class="mono small muted">${dayItems.length ? C.money(C.sumAmounts(dayItems.filter((i) => C.inTotals(i.bill)))) : ''}</span></div>
-    <div class="card list">${dayItems.length ? dayItems.map((i) => billRow(i, { sub: [i.group === 'investment' ? 'Investment · not in totals' : i.group === 'reminder' ? 'Reminder only' : i.group === 'excluded' ? 'Not counted' : C.accountName(d, i.bill.accountId), i.bill.freq].join(' · ') })) : h`<div class="empty">No bills due this day.</div>`}</div></div>
-  ${periods.length ? h`<div class="card pad stack" style="gap:14px"><div class="stack" style="gap:2px"><h3>Between paydays</h3><span class="small muted">Household bills each fortnight's pay has to cover</span></div>
-    ${periods.map((x) => h`<div class="stack" style="gap:6px"><div class="between small"><b style="font-weight:500">Pay ${C.fmtDate(x.p)} → ${C.fmtDate(x.e)}</b><span class="mono" style="font-weight:600">${C.money(x.bills)}</span></div>
-    <div class="bar"><span style="width:${(x.bills / maxB * 100).toFixed(0)}%;background:#1E4E8C"></span></div>
-    ${x.pay !== null ? h`<div class="xs ${x.pay - x.bills < 0 ? '' : 'muted'}" style="${x.pay - x.bills < 0 ? 'color:var(--red-ink)' : ''}">Pay in ${C.money(x.pay)} · left over ${C.money(x.pay - x.bills)}</div>` : h`<div class="xs muted">Add your pays on the Pay screen to see what's left over.</div>`}</div>`)}</div>` : h`<a class="card pad small" href="#/pay">Set your payday to see the fortnights →</a>`}`;
+  <div class="savebar"><div class="wrap"><button type="button" class="btn" data-back>Cancel</button><button type="button" class="btn primary" data-save>Save coin</button></div></div>`;
 }
-function payIn(payday) {
-  const d = doc();
-  let total = 0, any = false;
-  for (const p of (d.people || []).filter((x) => !x.del)) { const v = C.takeHomeFor(d, p.id, payday); if (v !== null) { total += v; any = true; } }
-  return any ? C.round2(total) : null;
+function photosSec(d){
+  const c=d.draft, ph=c.photos||[], cv=coverOf(c);
+  return `<h3><span class="ico" style="background:#15803D"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg></span>Photos<span class="sp" style="flex:1"></span><span class="muted small">${ph.length}</span></h3>
+  <div class="row"><button type="button" class="btn primary" data-cam><svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>Take photo</button><button type="button" class="btn" data-pickph>Choose from phone</button></div>
+  <p class="m0 muted small">New photos are labelled <b style="color:var(--mine)">MY COIN</b> and take turns as obverse, reverse, then card. The reverse (design side) shows on the coin list unless you pick another cover. Switch a mint or catalogue picture to <b>Reference</b> and say where it's from.</p>
+  ${ph.map((p,i)=>`<div class="phedit ${p.mine?"mine":"ref"}">${imgTag(p,'class="pimg"')}<div class="pc">
+    <div class="whose" role="group" aria-label="Whose photo"><button type="button" data-whose="${i}:mine" class="${p.mine?"on-mine":""}" aria-pressed="${!!p.mine}">My coin</button><button type="button" data-whose="${i}:ref" class="${p.mine?"":"on-ref"}" aria-pressed="${!p.mine}">Reference</button></div>
+    <select data-pside="${i}" aria-label="Side">${SIDES.map(s=>`<option ${p.side===s?"selected":""}>${s}</option>`).join("")}</select>
+    ${p.mine?"":`<select data-psrc="${i}" aria-label="Source">${SOURCES.map(s=>`<option ${p.source===s?"selected":""}>${s}</option>`).join("")}</select><input data-plink="${i}" type="url" placeholder="Web link (optional)" value="${esc(p.link||"")}" aria-label="Web link">`}
+    <div class="phbtns"><button type="button" class="btn sm ${p===cv?"amber":""}" data-pcover="${i}">${p===cv?"★ Cover":"☆ Make cover"}</button>${p.url?"":`<button type="button" class="btn sm" data-ptorc="${i}">Move to receipts</button>`}<button type="button" class="btn sm ghost" data-prm="${i}">Remove</button></div></div></div>`).join("")}`;
 }
+function drawPhotos(){ const d=topV(); const el=$("#phSec"); if(el){ el.innerHTML=photosSec(d); hydrateImages(el); } }
+function readForm(){ const d=topV(); if(!d||d.kind!=="edit") return null; const c=d.draft;
+  document.querySelectorAll("#sheet [data-f]").forEach(el=>{ c[el.dataset.f]=el.value; });
+  const s=$("#f_isSet"); if(s) c.isSet=s.checked;
+  if(d.packOther){ const po=$("#f_packOther"); if(po){ d.packOtherText=po.value.trim(); c.packaging=d.packOtherText; } }
+  return c; }
+function nextSide(c){ const used=new Set((c.photos||[]).filter(p=>p.mine).map(p=>p.side)); return ["Obverse","Reverse","Card / packaging"].find(s=>!used.has(s))||"Other"; }
+async function addPhotoFiles(files){
+  const d=topV(); if(!d||d.kind!=="edit") return; readForm(); const c=d.draft; let n=0;
+  toast(files.length>1?`Adding ${files.length} photos…`:"Adding photo…");
+  for(const f of files){ try{ const blob=await resizeImage(f,1600); const id=uid("f"); await dbPut("files",{id,blob,type:"image/jpeg",name:id+".jpg"}); d.newFiles.push(id); c.photos.push({id,mine:true,side:nextSide(c)}); n++; }catch(e){ toast("A photo couldn't be read: "+(e.message||e)); } }
+  drawPhotos(); if(n) toast(n===1?"Photo added":`${n} photos added`);
+}
+function clean(c){
+  for(const k of Object.keys(c)) if(typeof c[k]==="string") c[k]=c[k].trim();
+  for(const k of ["price","value","priceAud"]) if(!blank(c[k])){ const n=Number(String(c[k]).replace(/[$,\s]/g,"")); c[k]=isNaN(n)?c[k]:n; }
+  if(!blank(c.mintage)) c.mintage=String(c.mintage).replace(/[,\s]/g,"");
+  c.qty=Math.max(1,parseInt(c.qty,10)||1);
+  if(c.sheldon&&!/^\d{1,2}$/.test(c.sheldon)) c.sheldon="";
+  if(!c.isSet){ delete c.isSet; delete c.setCount; delete c.setContents; delete c.setItems; }
+  if(c.setItems&&!c.setItems.length) delete c.setItems;
+  if(c.setItems) c.setCount=String(c.setItems.length);
+  if(c.packaging===PACK_OTHER) delete c.packaging;
+  if(c.receiptIds){ c.receiptIds=[...new Set(c.receiptIds)]; if(!c.receiptIds.length) delete c.receiptIds; }
+  if(c.receiptCover){ for(const k of Object.keys(c.receiptCover)) if(!(c.receiptIds||[]).includes(k)||+c.receiptCover[k]>=c.qty) delete c.receiptCover[k]; if(!Object.keys(c.receiptCover).length) delete c.receiptCover; }
+  if(curOf(c.priceCur)==="AUD"){ delete c.priceAud; delete c.priceRate; }
+  for(const k of Object.keys(c)) if(c[k]===""||c[k]==null) delete c[k];
+  return c;
+}
+async function saveCoin(){
+  const d=topV(); readForm(); const c=d.draft;
+  const nsid=($("#f_nsid")||{}).value; if(nsid&&(!c.ns||String(c.ns.id)!==nsid.trim())&&/^\d+$/.test(nsid.trim())) c.ns={id:+nsid.trim(),url:`https://en.numista.com/${nsid.trim()}`};
+  if(!c.denom&&blank(c.title)&&blank(c.series)){ toast("Pick a denomination or give it a name first"); return; }
+  if(!blank(c.year)&&!/^\d{4}(\s*[-–]\s*\d{4})?$/.test(String(c.year).trim())){ toast("Year should look like 2022 (or 2020-2021)"); return; }
+  clean(c);
+  const prev=d.id?S.coins.find(x=>x.id===d.id):null;
+  if(prev&&!blank(c.value)&&String(c.value)!==String(prev.value??"")&&!c.valueDate) c.valueDate=todayISO();
+  if(!prev&&!blank(c.value)&&!c.valueDate) c.valueDate=todayISO();
+  if(pendingConv(c)||(prev&&(prev.price!==c.price||prev.priceCur!==c.priceCur||prev.acqDate!==c.acqDate)&&curOf(c.priceCur)!=="AUD")){ delete c.priceAud; try{ await convertCoin(c); }catch{} }
+  c.id=d.id||uid("c"); c.addedAt=c.addedAt||new Date().toISOString(); c.updatedAt=new Date().toISOString();
+  if(c.photos&&c.coverId&&!c.photos.some(p=>p.id===c.coverId)) delete c.coverId;
+  for(const r of (d.newReceipts||[])) if((c.receiptIds||[]).includes(r.id)){ const {fromPhoto,...rec}=r; for(const k of ["seller","orderNo","notes"]) if(typeof rec[k]==="string") rec[k]=rec[k].trim(); for(const k of ["total","postage"]) if(!blank(rec[k])){ const n=Number(String(rec[k]).replace(/[$,\s]/g,"")); rec[k]=isNaN(n)?null:n; } for(const k of Object.keys(rec)) if(rec[k]===""||rec[k]==null) delete rec[k]; rec.updatedAt=new Date().toISOString(); await dbPut("receipts",rec); }
+  await dbPut("coins",c); d.saved=true;
+  const maybeUnused=[...(d.removedFiles||[]),...filesOf(prev),...(d.newFiles||[])];
+  if(d.fromWant){ const w=S.wanted.find(x=>x.id===d.fromWant); if(w){ await dbPut("wanted",{...w,got:true,gotAt:new Date().toISOString(),coinId:c.id}); } }
+  await reload(); await dropUnused(maybeUnused); askPersist();
+  if(d.id){ toast("Saved"); await popView(); }
+  else { S.stack=[{kind:"detail",id:c.id}]; drawTop(true); toast("Coin added"); }
+}
+async function deleteCoin(id){ const c=S.coins.find(x=>x.id===id); const ids=filesOf(c); await dbDel("coins",id); await reload(); await dropUnused(ids); toast("Coin deleted"); await popView(); }
 
-function scrBills() {
-  const d = doc(), t = today(), q = (S.ui.q || '').toLowerCase().trim();
-  const match = (b) => !q || [b.name, b.provider, b.notes, C.accountName(d, b.accountId)].join(' ').toLowerCase().includes(q);
-  const live = C.liveBills(d).filter(match);
-  const active = live.filter((b) => b.status === 'active');
-  const annual = C.round2(C.liveBills(d).filter((b) => C.inTotals(b) && b.status === 'active').reduce((a, b) => a + C.annualAmount(b, t, d), 0));
-  const types = (d.types || []).filter((x) => !x.del).sort((a, b) => (a.order || 0) - (b.order || 0));
-  const sections = [];
-  const groupCard = (key, title, color, list, sub, cls = '') => {
-    if (!list.length) return '';
-    const open = q || S.ui.open[key];
-    const ann = C.round2(list.filter((b) => b.status === 'active').reduce((a, b) => a + C.annualAmount(b, t, d), 0));
-    return h`<div class="card ${cls}" style="overflow:hidden"><button class="item" data-act="toggle" data-k="${key}" aria-expanded="${!!open}" style="min-height:58px">${color ? h`<span class="dot lg" style="background:${color}"></span>` : ''}<span class="grow stack" style="gap:2px"><span style="font-size:16px;font-weight:600">${title}</span><span class="s">${sub || list.length + ' bill' + (list.length > 1 ? 's' : '') + ' · ' + C.money(ann / 12, 0) + ' a month'}</span></span><span class="mono small">${C.money(ann, 0)}/yr</span>${icon(open ? 'up' : 'down', 18)}</button>
-    ${open ? h`<div class="list" style="border-top:1px solid var(--line2)">${list.map((b) => registerRow(b))}</div>` : ''}</div>`;
-  };
-  const oneOffs = active.filter((b) => C.isOneOff(b));
-  const oneOffDone = oneOffs.filter((b) => C.oneOffDone(d, b, t)), oneOffOpen = oneOffs.filter((b) => !C.oneOffDone(d, b, t));
-  const hhCounted = active.filter((b) => C.inTotals(b) && !C.isOneOff(b));
-  for (const ty of types) {
-    const list = hhCounted.filter((b) => b.typeId === ty.id);
-    sections.push(groupCard('t:' + ty.id, ty.name, ty.color, list));
-  }
-  const untyped = hhCounted.filter((b) => !C.byId(d.types, b.typeId));
-  sections.push(groupCard('t:none', 'No type', '#8A948D', untyped));
-  const notCounted = active.filter((b) => b.kind === 'household' && !C.inTotals(b) && !C.isOneOff(b));
-  const invest = active.filter((b) => b.kind === 'investment' && !C.inTotals(b) && !C.isOneOff(b));
-  const props = (d.properties || []).filter((p) => !p.del);
-  const reminders = active.filter((b) => b.kind === 'reminder' && !C.isOneOff(b));
-  const pending = live.filter((b) => b.status === 'pending');
-  const stopped = live.filter((b) => b.status === 'stopped');
-  const pc = (d.settings.payCheckPending || []).length;
-  return h`${head('All bills', h`<a class="icon-btn brand" href="#/edit/new" aria-label="Add a bill">${icon('plus')}</a>`)}
-  <label class="card row" style="padding:0 14px;min-height:48px">${icon('search', 18)}<span class="sr">Search bills</span><input id="q" type="search" value="${S.ui.q}" placeholder="Search name, provider or account" style="border:0;outline:0;flex:1;min-width:0;background:transparent;font-size:16px;min-height:46px" data-input="q"></label>
-  ${pc ? h`<a class="banner amber" href="#/checkpay" style="color:inherit">Confirm how ${pc} bills are paid →</a>` : ''}
-  <div class="grid3"><div class="tile"><span class="k">A year</span><span class="v" style="font-size:15px">${C.money(annual, 0)}</span></div><div class="tile"><span class="k">A month</span><span class="v" style="font-size:15px">${C.money(annual / 12, 0)}</span></div><div class="tile"><span class="k">Per payday</span><span class="v" style="font-size:15px">${C.money(annual / 26, 0)}</span></div></div>
-  <div class="eyebrow">Household bills · ${hhCounted.length} counted in totals</div>
-  ${sections}
-  ${notCounted.length ? h`<div class="eyebrow">Not counted in totals</div>${groupCard('nc', 'Not counted', '#8A948D', notCounted, notCounted.length + ' · still reminded and shown, left out of totals')}` : ''}
-  ${invest.length || props.length ? h`<div class="stack" style="gap:4px;padding:8px 2px 0"><div class="eyebrow" style="color:var(--inv-ink);padding:0">Investment properties</div><div class="small" style="color:#4A5068">Still reminded, but <b>not included in any household totals</b>.</div><a href="#/properties" class="small" style="font-weight:600;color:var(--inv-ink);padding:4px 0">Rent, costs & net per property →</a></div>
-    ${props.map((p) => groupCard('p:' + p.id, p.name, '#6250d6', invest.filter((b) => b.propertyId === p.id), null, 'inv'))}
-    ${groupCard('p:none', 'Across the portfolio', '#6250d6', invest.filter((b) => !C.byId(d.properties, b.propertyId)), null, 'inv')}` : ''}
-  ${reminders.length ? h`<div class="eyebrow">Reminders only · paying for others</div>${(d.others || []).filter((o) => !o.del).map((o) => groupCard('o:' + o.id, o.name, '#8A948D', reminders.filter((b) => b.forWhom === o.id), null, 'dashed'))}${groupCard('o:none', 'Others', '#8A948D', reminders.filter((b) => !C.byId(d.others, b.forWhom)), null, 'dashed')}` : ''}
-  ${oneOffOpen.length ? h`<div class="eyebrow">One-off bills</div>${groupCard('oo', 'One-off bills — coming up', '#8A948D', oneOffOpen, oneOffOpen.length + ' · paid once, not in the yearly figures above')}` : ''}
-  ${oneOffDone.length ? h`${!oneOffOpen.length ? h`<div class="eyebrow">One-off bills</div>` : ''}${groupCard('ood', 'One-off bills — done', '#8A948D', oneOffDone, oneOffDone.length + ' · paid · kept for reports', 'dashed')}` : ''}
-  ${pending.length ? h`<div class="eyebrow">Not started yet</div>${groupCard('pending', 'Waiting for details', '#8A948D', pending, pending.length + ' · no reminders until you add the details')}` : ''}
-  ${stopped.length ? h`<div class="eyebrow">Stopped</div>${groupCard('stopped', 'Stopped bills', '#8A948D', stopped, stopped.length + ' · history kept · restore any time')}` : h`<div class="card dashed pad between"><span class="stack" style="gap:2px"><b>Stopped bills</b><span class="small muted">Cancelled or switched bills keep their history here.</span></span><span class="mono muted">0</span></div>`}`;
-}
-function registerRow(b) {
-  const d = doc(), t = today();
-  const nd = C.nextDue(b, t);
-  const a = nd ? C.amountOn(b, nd, d) : C.baseAmountOn(b, t);
-  const missing = b.status === 'active' && (a === null || !nd);
-  const sub = b.status === 'pending' ? (b.notes || 'Not started yet') : a === null ? 'Amount not set' : (C.isEstimate(b) ? '≈' : '') + C.money(a) + ' · ' + (b.freq || '—') + (b.status === 'stopped' ? ' · stopped ' + C.fmtDate(b.stoppedAt, { year: true }) : '');
-  return h`<a class="item" href="#/bill/${b.id}"><span class="grow stack" style="gap:2px"><span class="t">${b.name}</span><span class="s">${sub}</span></span>
-  ${C.oneOffDone(d, b, t) ? h`<span class="pill green">Paid</span>` : C.isOneOff(b) && !nd && b.status === 'active' ? h`<span class="pill red">Not paid</span>` : missing && !C.isOneOff(b) ? h`<span class="pill amber">Needs details</span>` : nd && b.status === 'active' ? h`<span class="stack" style="gap:2px;align-items:flex-end"><span class="xs muted">Next</span><span class="small" style="font-weight:500">${C.fmtDate(nd, { dow: false, today: t })}</span></span>` : ''}</a>`;
-}
-
-function scrReviews() {
-  const d = doc(), t = today();
-  const list = C.liveBills(d).filter((b) => b.status !== 'stopped' && b.review && b.review.applicable).map((b) => ({ b, r: C.reviewInfo(b, t), nd: C.nextDue(b, t) }));
-  const count = (s) => list.filter((x) => x.r.status === s).length;
-  const up = count('ok'), soon = count('soon'), over = count('overdue'), never = count('never'), fut = count('future');
-  list.sort((a, b) => ((a.r.next || '0') < (b.r.next || '0') ? -1 : 1));
-  const na = C.liveBills(d).filter((b) => b.status !== 'stopped' && !(b.review && b.review.applicable)).length;
-  const pctUp = list.length ? up / list.length * 100 : 0, pctSoon = list.length ? soon / list.length * 100 : 0;
-  return h`${head('Reviews')}
-  <div class="small" style="color:var(--ink2);line-height:1.45;margin-top:-8px">Once a year, check each reviewable bill is still the best deal. Tick it here when you have.</div>
-  <div class="card pad stack" style="gap:14px"><div class="row" style="gap:8px;align-items:baseline"><span class="mono" style="font-size:34px;font-weight:600">${up + soon}</span><span class="muted">of ${list.length} reviewed in the last 12 months</span></div>
-    <div class="bar" style="height:12px;display:flex"><span style="width:${pctUp}%;background:#1B6B3A;border-radius:0;height:12px"></span><span style="width:${pctSoon}%;background:#D08A1E;border-radius:0;height:12px"></span></div>
-    <div class="grid2"><div class="tile" style="background:var(--green-soft);border:0"><span class="k" style="color:var(--green-ink);font-weight:600">Up to date</span><span class="v">${up}</span></div><div class="tile" style="background:var(--amber-soft);border:0"><span class="k" style="color:var(--amber-ink);font-weight:600">Due soon (≤ 30 days)</span><span class="v">${soon}</span></div>
-    <div class="tile" style="background:var(--red-soft);border:0"><span class="k" style="color:var(--red-ink);font-weight:600">Overdue</span><span class="v">${over}</span></div><div class="tile" style="background:var(--red-soft);border:0"><span class="k" style="color:var(--red-ink);font-weight:600">Never reviewed</span><span class="v">${never}</span></div></div>
-    <div class="small muted">${na} other bills don't need reviewing. Turn reviewing on in a bill's edit screen.</div></div>
-  ${fut ? h`<div class="banner amber">${fut} bill${fut > 1 ? 's have' : ' has'} a last-reviewed date in the future — open ${fut > 1 ? 'them' : 'it'} and fix the date.</div>` : ''}
-  <div class="between" style="padding:4px 2px 0"><h2>Coming up</h2><span class="small muted">Soonest first</span></div>
-  <div class="card list">${list.length ? list.map(({ b, r, nd }) => h`<div class="item"><span class="stack" style="width:46px;flex-shrink:0;align-items:center;background:var(--bg);border-radius:8px;padding:4px 0"><span class="xs muted" style="font-weight:600;text-transform:uppercase">${r.next ? C.monthName(Number(r.next.slice(5, 7)) - 1, false) : '—'}</span><b style="font-size:17px">${r.next ? Number(r.next.slice(8)) : '?'}</b></span>
-    <a class="grow stack" href="#/bill/${b.id}" style="gap:3px;color:inherit"><span class="t">${b.name}</span><span class="xs muted">${b.review.last ? 'Last reviewed ' + C.fmtDate(b.review.last, { year: true, dow: false }) : 'Never reviewed'}${nd && (b.freq === 'Annual' || b.freq === 'Every 5 yrs') ? ' · renews ' + C.fmtDate(nd, { dow: false }) : ''}</span></a>
-    ${r.status === 'ok' ? h`<span class="pill green">Up to date</span>` : h`<button class="btn small" data-act="review" data-bill="${b.id}">Reviewed</button>`}</div>`) : h`<div class="empty">No bills are set to be reviewed.</div>`}</div>
-  <div class="card pad small" style="line-height:1.5;color:var(--ink2)"><b>How the status works</b> — same rules as your spreadsheet: the next review is 12 months after the last. <b>Due soon</b> = within 30 days of that. <b>Overdue</b> = past it. Annual bills also get a "compare before it renews" alert 45 days before renewal if not reviewed.</div>`;
-}
-
-function scrSettings() {
-  const d = doc();
-  const link = (href, title, sub) => h`<a class="item" href="${href}" style="min-height:60px"><span class="grow stack" style="gap:2px"><span class="t" style="font-weight:600">${title}</span><span class="s">${sub}</span></span>${icon('next', 18)}</a>`;
-  const pd = d.settings.payday && d.settings.payday.base;
-  const nextPay = C.paydays(d.settings, today(), C.addDays(today(), 14))[0];
-  const topic = d.settings.ntfy && d.settings.ntfy.topic;
-  return h`${head('Settings')}
-  <div class="eyebrow">Alerts</div>
-  <div class="card list">${link('#/alerts', 'Push alerts & reminder times', topic ? 'ntfy topic set · ' + (d.settings.reminders.time || '07:00') + ' every morning' : 'Not set up yet')}${link('#/transfers', 'Savings transfers', 'Revolut savings → personal, the day before each linked bill')}</div>
-  <div class="eyebrow">Customise — every list can be added to, renamed or removed</div>
-  <div class="card list">${link('#/pay', 'Pay & paydays', (d.people || []).filter((p) => !p.del).map((p) => p.name).join(' + ') + (pd ? ' · every 2nd ' + C.dowName(C.dow(pd), true) + (nextPay ? ' · next ' + C.fmtDate(nextPay, { dow: false }) : '') : ' · set your payday'))}
-  ${link('#/accounts', 'Accounts', (d.accounts || []).filter((a) => !a.del && a.active !== false).map((a) => a.name).join(' · ') || 'None yet')}
-  ${link('#/types', 'Bill types & colours', (d.types || []).filter((x) => !x.del).length + ' types')}
-  ${link('#/properties', 'Investment properties', (d.properties || []).filter((p) => !p.del && p.status !== 'sold').map((p) => p.name).join(' · ') || 'None')}
-  ${link('#/others', 'People you pay bills for', (d.others || []).filter((o) => !o.del).map((o) => o.name).join(' · ') || 'None')}
-  ${link('#/checkpay', 'How each bill is paid', (d.settings.payCheckPending || []).length ? (d.settings.payCheckPending.length + ' to confirm') : 'All confirmed')}</div>
-  <div class="eyebrow">Sharing, backup & Excel</div>
-  <div class="card list">${link('#/sync', 'Sharing with Lyndsey & backup', [S.dev.github ? 'GitHub ✓' + (S.dev.lastSync ? ' ' + new Date(S.dev.lastSync).toLocaleString('en-AU', { dateStyle: 'medium', timeStyle: 'short' }) : '') : 'GitHub not connected', DB.isOn(S.dev) ? (S.dbx === 'error' ? 'Dropbox problem' : 'Dropbox ✓') : 'Dropbox not connected'].join(' · '))}
-  ${link('#/excel', 'Excel workbook', 'Refresh button for tab 11 · or download a CSV')}
-  ${link('#/activity', 'Recent changes', 'Who changed what')}</div>
-  <div class="card pad small muted" style="line-height:1.5">This phone: <b>${S.dev.name || 'not named'}</b> · <button class="btn small ghost" data-act="rename-device">Change</button><br>Data imported ${d.importedAt ? C.fmtDate(d.importedAt, { year: true }) : '—'}${d.importedFrom ? ' from ' + d.importedFrom : ''}. Version ${APP_VERSION}.</div>`;
-}
-
-function scrActivity() {
-  const a = (doc().activity || []).slice(0, 100);
-  return h`${back('#/settings', 'Recent changes')}<div class="card list">${a.length ? a.map((x) => h`<div class="item"><span class="grow stack" style="gap:2px"><span class="t" style="font-size:14px">${x.text}</span><span class="s">${x.by || ''} · ${new Date(x.at).toLocaleString('en-AU', { dateStyle: 'medium', timeStyle: 'short' })}</span></span></div>`) : h`<div class="empty">No changes yet.</div>`}</div>`;
-}
-
-// ----- bill detail -----
-function scrBill(id) {
-  const d = doc(), t = today(), b = C.byId(d.bills, id);
-  if (!b) return h`${back('#/bills', 'Bill not found')}`;
-  const nd = C.nextDue(b, t);
-  const a = nd ? C.amountOn(b, nd, d) : C.baseAmountOn(b, t);
-  const st = nd ? C.payState(d, b, nd, t) : null;
-  const rv = C.reviewInfo(b, t);
-  const fu = C.followUps(d, t).find((f) => f.bill.id === b.id);
-  const past = C.occurrences(b, C.addDays(t, -400), C.addDays(t, -1)).slice(-6).reverse();
-  const overdue = past.filter((dd) => C.payState(d, b, dd, t) === 'overdue');
-  const ty = C.typeOf(d, b);
-  const hist = C.priceHistory(b);
-  const maxH = Math.max(1, ...hist.map((x) => x.amount));
-  const kindLabel = b.kind === 'investment' ? 'Investment' + (propName(b) ? ' · ' + propName(b) : '') : b.kind === 'reminder' ? 'Reminder only · ' + (byIdName(d.others, b.forWhom) || 'someone else') : (ty ? ty.name : 'Household');
-  const payLabel = { dd: 'Direct debit · ticks itself', manual: 'You pay it' + (b.bpay && b.bpay.biller ? ' · BPAY ' + b.bpay.biller + (b.bpay.ref ? ' / ' + b.bpay.ref : '') : ''), rent: 'Taken from the rent' }[b.payMethod] || '—';
-  const recentDD = b.payMethod !== 'manual' ? past.find((dd) => C.daysBetween(dd, t) <= 10) : null;
-  return h`${back('#/bills', b.name, kindLabel)}
-  ${b.status !== 'active' ? h`<div class="banner ${b.status === 'stopped' ? 'red' : 'amber'}">${b.status === 'stopped' ? 'Stopped on ' + C.fmtDate(b.stoppedAt, { year: true }) + '. No more reminders; history kept.' : 'Not started yet — no reminders until you add the details and switch it on.'}</div>` : ''}
-  <div class="card pad stack" style="gap:14px">
-    <div class="between" style="align-items:flex-start"><span class="stack" style="gap:2px"><span class="mono" style="font-size:32px;font-weight:600">${amt(b, a)}</span><span class="small muted">${b.freq || '—'}${C.isOneOff(b) ? (b.refDate ? ' · due ' + C.fmtDate(b.refDate, { year: true }) : '') : a !== null && C.PER_YEAR[b.freq] ? ' · about ' + C.money(a * C.PER_YEAR[b.freq] / 12) + ' a month' : ''}${b.amountMode === 'percentPay' ? ' · ' + b.percent + '% of ' + (byIdName(d.people, b.personId) || 'pay') + '’s ' + (b.percentBase === 'takeHome' ? 'take-home' : 'gross') + ' pay' : ''}</span></span>
-      ${nd ? (st === 'paid' ? h`<span class="pill green">Paid</span>` : st === 'scheduled' ? h`<span class="pill blue">Scheduled</span>` : relPill(C.daysBetween(t, nd))) : ''}</div>
-    <div class="grid2"><div class="stack" style="gap:2px"><span class="xs muted">${C.isOneOff(b) ? 'Due' : 'Next due'}</span><b>${nd ? C.fmtDate(nd, { year: true }) : C.isOneOff(b) && b.refDate ? C.fmtDate(b.refDate, { year: true }) : '—'}</b>${nd && weekendNote(b, nd) ? h`<span class="xs muted">${weekendNote(b, nd).slice(3)}</span>` : ''}</div><div class="stack" style="gap:2px"><span class="xs muted">Paid from</span><b>${b.accountId ? C.accountName(d, b.accountId) : '—'}</b></div></div>
-    ${overdue.length ? h`<button class="btn" data-act="pay" data-bill="${b.id}" data-due="${overdue[overdue.length - 1]}">Mark the ${C.fmtDate(overdue[overdue.length - 1], { dow: false })} payment as paid</button>`
-      : b.payMethod === 'manual' && nd && !C.settled(st) ? h`<button class="btn" data-act="pay" data-bill="${b.id}" data-due="${nd}">Mark ${C.fmtDate(nd, { dow: false })} as paid</button>` : ''}
-    ${nd && C.paymentFor(d, b.id, nd) && C.settled(st) ? h`<button class="btn ghost small" data-act="payedit" data-bill="${b.id}" data-due="${nd}">${payLine(b, nd, st)} · Change</button>` : ''}
-    ${recentDD ? h`<button class="btn ghost small" data-act="missed" data-bill="${b.id}" data-due="${recentDD}">${C.payState(d, b, recentDD, t) === 'missed' ? 'Undo “didn’t come out” for ' : 'The ' }${C.fmtDate(recentDD, { dow: false })}${C.payState(d, b, recentDD, t) === 'missed' ? '' : ' debit didn’t come out'}</button>` : ''}
+/* ---------- filters sheet ---------- */
+function fsel(id,label,opts,cur,anyLabel){ return `<div class="field"><label for="${id}">${esc(label)}</label><select id="${id}" data-ff="${id.slice(3)}"><option value="">${esc(anyLabel||"Any")}</option>${opts.map(o=>Array.isArray(o)?`<option value="${esc(o[0])}" ${cur===o[0]?"selected":""}>${esc(o[1])}</option>`:`<option ${cur===o?"selected":""}>${esc(o)}</option>`).join("")}</select></div>`; }
+function filtersHTML(){
+  const f=S.f, vals=k=>[...new Set(S.coins.map(c=>c[k]).filter(v=>!blank(v)))].sort((a,b)=>String(a).localeCompare(String(b)));
+  const n=results().length;
+  return `<div class="shead"><div class="wrap">${backBtn("Done")}<h2>Filters</h2><button type="button" class="btn sm" data-clearall>Clear all</button></div></div>
+  <div class="wrap sbody">
+   <section class="fsec"><h3>Denomination</h3><div class="pick">${GRP_ORDER.filter(g=>S.coins.some(c=>grpOf(c)===g)).map(g=>`<button type="button" data-grp="${g}" aria-pressed="${f.grp.includes(g)}">${GROUPS[g].label}</button>`).join("")}</div>
+     ${fsel("ff_denom","Exact value",DENOMS.filter(d=>S.coins.some(c=>c.denom===d.k)).map(d=>d.k),f.denom)}</section>
+   <section class="fsec"><h3>Year</h3><div class="grid2"><div class="field"><label for="ff_yFrom">From</label><input id="ff_yFrom" data-ff="yFrom" inputmode="numeric" value="${esc(f.yFrom)}" placeholder="e.g. 1966"></div><div class="field"><label for="ff_yTo">To</label><input id="ff_yTo" data-ff="yTo" inputmode="numeric" value="${esc(f.yTo)}" placeholder="e.g. 2023"></div></div></section>
+   <section class="fsec"><h3>About the coin</h3><div class="grid2">
+     ${fsel("ff_series","Theme / series",vals("series"),f.series)}${fsel("ff_coll","Collection",COLLS,f.coll)}
+     ${fsel("ff_mint","Mint / privy mark",vals("mint"),f.mint)}${fsel("ff_colour","Coloured",[["yes","Coloured"],["no","Not coloured"]],f.colour)}
+     ${fsel("ff_grade","Grade",GRADES,f.grade)}${fsel("ff_finish","Finish",FINISHES,f.finish)}
+     ${fsel("ff_pack","Packaging",packOptions(),f.pack)}${fsel("ff_how","How acquired",HOWS,f.how)}</div>
+     <label class="check-inline"><input type="checkbox" data-ffc="sets" ${f.sets?"checked":""}><span>Sets only</span></label></section>
+   <section class="fsec"><h3>Finding it</h3><div class="grid2">${fsel("ff_storage","Storage location",vals("storage"),f.storage)}${fsel("ff_photos","Photos",[["mine","Has my photos"],["none","No photos of mine yet"]],f.photos)}</div>
+     <label class="check-inline"><input type="checkbox" data-ffc="todo" ${f.todo?"checked":""}><span>Still needs details (to finish)</span></label>
+     <label class="check-inline"><input type="checkbox" data-ffc="dupes" ${f.dupes?"checked":""}><span>Duplicates (quantity 2 or more)</span></label>
+     ${fsel("ff_status","Show",[["all","All, including sold"],["sold","Sold / traded only"]],f.status==="owned"?"":f.status,"In my collection")}</section>
   </div>
-  ${C.oneOffDone(d, b, t) ? h`<div class="banner green">This one-off bill is done — no more reminders. It stays in reports and history.</div>` : ''}
-  ${fu ? h`<div class="banner ${fu.p === 1 ? 'red' : 'amber'}"><b>${fu.p === 1 ? 'Needs attention' : 'To check'}:</b> ${fu.text}</div>` : ''}
-  ${(b.todos || []).filter((x) => !x.del).length ? h`<div class="card list">${b.todos.filter((x) => !x.del).map((td) => h`<div class="item"><button class="tick ${td.done ? 'on' : ''}" data-act="todo" data-bill="${b.id}" data-id="${td.id}" aria-label="Done">${icon('check', 18, 2.4)}</button><span class="grow t" style="${td.done ? 'text-decoration:line-through;color:#7A848D' : ''}">${td.text}</span></div>`)}</div>` : ''}
-  ${b.review && b.review.applicable ? h`<div class="card pad stack" style="gap:12px"><div class="between"><h3>Review</h3><span class="pill ${rv.status === 'ok' ? 'green' : rv.status === 'soon' ? 'amber' : 'red'}">${rv.label}</span></div>
-    <div class="grid2"><div class="stack" style="gap:2px"><span class="xs muted">Last reviewed</span><b style="font-weight:500">${b.review.last ? C.fmtDate(b.review.last, { year: true, dow: false }) : '—'}</b></div><div class="stack" style="gap:2px"><span class="xs muted">Next review</span><b style="font-weight:500">${rv.next ? C.fmtDate(rv.next, { year: true, dow: false }) : '—'}</b></div></div>
-    <button class="btn sec" data-act="review" data-bill="${b.id}">I’ve reviewed it</button>
-    ${(b.review.log || []).length ? h`<div class="stack" style="gap:4px">${b.review.log.slice().reverse().slice(0, 5).map((l) => h`<div class="xs muted">${C.fmtDate(l.date, { year: true, dow: false })} · ${l.outcome || 'Reviewed'}${l.note ? ' — ' + l.note : ''} · ${l.by || ''}</div>`)}</div>` : ''}</div>` : ''}
-  <div class="card pad stack" style="gap:12px"><div class="between"><h3>Price history</h3><button class="btn small sec" data-act="newamount" data-bill="${b.id}">Change amount</button></div>
-    ${hist.length ? hist.slice().reverse().map((x) => h`<div class="stack" style="gap:4px"><div class="between small"><span>${x.from <= '2000-01-01' ? 'Since tracking began' : 'From ' + C.fmtDate(x.from, { year: true, dow: false })}</span><span><span class="mono" style="font-weight:600">${C.money(x.amount)}</span> ${x.change !== null ? h`<span class="xs" style="font-weight:600;color:${x.change > 0 ? 'var(--red)' : '#1B6B3A'}">${x.change > 0 ? '▲ +' : '▼ '}${x.pct}%</span>` : ''}</span></div><div class="bar"><span style="width:${(x.amount / maxH * 100).toFixed(1)}%;background:${C.typeColor(d, b)}"></span></div>${x.note ? h`<span class="xs muted">${x.note}</span>` : ''}</div>`) : h`<div class="small muted">No amount yet.</div>`}
-    <div class="xs muted">Old payments keep the amount that applied then. Reports list every bill that went up or down.</div></div>
-  <div class="card" style="padding:4px 16px">
-    ${detailRow('How it’s paid', payLabel)}${b.transferDayBefore ? detailRow('Day-before transfer', 'Savings → ' + (b.accountId ? C.accountName(d, b.accountId) : 'personal')) : ''}
-    ${detailRow('Type', kindLabel)}${detailRow('In household totals', C.inTotals(b) ? 'Yes' : 'No')}
-    ${b.provider ? detailRow('Provider', b.provider) : ''}${b.accountNo ? h`<div class="between" style="padding:12px 0;border-bottom:1px solid var(--line2);font-size:15px"><span class="muted">Policy / account #</span><button class="btn small ghost" data-act="reveal" data-v="${b.accountNo}">•••• tap to show</button></div>` : ''}
-    ${b.endDate ? detailRow('Ends on', C.fmtDate(b.endDate, { year: true })) : ''}${b.expectedChange ? detailRow('Expected change', b.expectedChange) : ''}
-    ${detailRow('Reminders', b.remind === false ? 'Off' : 'On')}${b.dueText ? detailRow('Spreadsheet due date(s)', b.dueText) : ''}
-    ${b.notes ? h`<div class="stack" style="gap:4px;padding:12px 0"><span class="muted" style="font-size:15px">Notes</span><span>${b.notes}</span></div>` : ''}</div>
-  ${past.length ? h`<div class="stack" style="gap:6px"><div class="between" style="padding:0 2px"><h3>Recent payments</h3><span class="xs muted">Tap one to change it</span></div><div class="card list">${past.map((dd) => { const s = C.payState(d, b, dd, t); return h`<div class="item"><button class="grow stack" data-act="payedit" data-bill="${b.id}" data-due="${dd}" style="gap:2px;text-align:left;background:none;border:0;padding:0;color:inherit;font:inherit"><span class="t" style="font-size:14px">${C.fmtDate(dd, { year: true })}</span><span class="s">${payLine(b, dd, s)}</span></button><span class="amt">${amt(b, payAmount(b, dd))}</span>${b.payMethod === 'manual' ? h`<button class="tick ${C.settled(s) ? 'on' : ''}" data-act="pay" data-bill="${b.id}" data-due="${dd}" aria-label="Paid">${icon('check', 18, 2.4)}</button>` : ''}</div>`; })}</div></div>` : C.isISO(b.startDate) && b.status === 'active' ? h`<div class="card pad small muted">No payments yet${nd ? ' — first payment due ' + C.fmtDate(nd, { year: true }) : ''}.</div>` : ''}
-  <div class="grid2 no-print"><a class="btn ghost" href="#/edit/${b.id}">Edit</a>${b.status === 'stopped' ? h`<button class="btn sec" data-act="restart" data-bill="${b.id}">Restart</button>` : h`<button class="btn danger" data-act="stop" data-bill="${b.id}">Stop this bill</button>`}</div>
-  <button class="btn ghost small no-print" data-act="delete" data-bill="${b.id}" style="align-self:center">Delete permanently</button>`;
+  <div class="savebar"><div class="wrap"><button type="button" class="btn primary" data-back>Show ${n} coin${n===1?"":"s"}</button></div></div>`;
 }
-// One line describing a payment: when it was paid, by whom, early/late.
-function payLine(b, due, s) {
-  const d = doc(), p = C.paymentFor(d, b.id, due);
-  if (s === 'missed') return 'Didn’t come out';
-  if (s === 'scheduled') return 'Scheduled · ' + C.fmtDate(p.date);
-  if (s === 'paid' && p) { const tm = C.paidTiming(p, due); return 'Paid ' + C.fmtDate(p.date, { dow: false }) + (tm && tm !== 'on the day' ? ' · ' + tm : '') + (p.by ? ' · ' + p.by : '') + (p.note ? ' · ' + p.note : ''); }
-  if (s === 'paid') return due < (d.trackedFrom || '') || (b.addedOn && due < b.addedOn) ? 'Before the app' : b.payMethod === 'manual' ? 'Paid' : 'Direct debit';
-  return s === 'overdue' ? 'Not paid yet' : 'Due';
+function updFilterCount(){ const b=document.querySelector("#sheet .savebar [data-back]"); if(b&&topV()&&topV().kind==="filters"){ const n=results().length; b.textContent=`Show ${n} coin${n===1?"":"s"}`; } }
+/* ---------- album and year checklist sheets ---------- */
+function albumHTML(d){
+  const a=albumData().find(x=>x.key===d.key)||{key:d.key,units:[],wants:[]}; const o=a.units.length,w=a.wants.length;
+  const us=a.units.slice().sort((x,y)=>(unitYear(x)||0)-(unitYear(y)||0)||x.title.localeCompare(y.title));
+  const lbl=u=>{ const par=u.title.match(/\(([^)]+)\)\s*$/); if(u.item&&par) return par[1]; const s=u.title.replace(new RegExp("^"+String(u.year||"").replace(/[^\d]/g,"")+"\\s*"),"").replace(a.key,"").replace(/^[\s–\-:,]+/,"").trim(); return s||u.denom||""; };
+  return `<div class="shead"><div class="wrap">${backBtn("Albums")}<h2>${esc(a.key)}</h2></div></div>
+  <div class="wrap sbody">
+    <div class="stats"><div class="stat" style="background:#DDF5F2"><b style="color:#115E59">${o}</b><span>Owned</span></div><div class="stat" style="background:#FFF4DB"><b style="color:#92400E">${w}</b><span>Wanted</span></div><div class="stat"><b>${o+w?Math.round(o/(o+w)*100)+"%":"—"}</b><span>Complete</span></div></div>
+    ${w?progBar(o,0,o+w):""}
+    <section class="card" style="padding:16px 8px 8px"><div class="slots">
+      ${us.map(u=>`<button type="button" class="slot" data-open="${u.open}"><span class="ring" style="background:${unitTheme(u).tint}">${unitFace(u,52)}</span><b style="color:${unitTheme(u).text}">${esc(u.year||"—")}</b><span>${esc(lbl(u))}</span></button>`).join("")}
+      ${a.wants.map(x=>`<button type="button" class="slot" data-wgot="${x.id}"><span class="empty-c want">Want</span><b>${esc(x.year||"—")}</b><span>${esc(x.title)}</span></button>`).join("")}
+      <button type="button" class="slot" data-addwant="${esc(a.key)}"><span class="empty-c">+</span><b>Add</b><span>a want</span></button>
+    </div></section>
+    <p class="m0 muted small">Tap a coin to open it (coins in a set open the set). Tap an amber "Want" when you get it — it becomes a coin record.</p>
+  </div>`;
 }
-function payAmount(b, due) { const p = C.paymentFor(doc(), b.id, due); return p && p.status === 'paid' && typeof p.amount === 'number' ? p.amount : C.amountOn(b, due, doc()); }
-function detailRow(k, v) { return h`<div class="between" style="padding:12px 0;border-bottom:1px solid var(--line2);font-size:15px"><span class="muted">${k}</span><span style="font-weight:500;text-align:right">${v}</span></div>`; }
+function tlistHTML(d){
+  const t=typeLists().find(x=>String(x.id)===String(d.id)); if(!t) return `<div class="shead"><div class="wrap">${backBtn()}</div></div>`;
+  const own=t.issues.filter(i=>ownsIssue(t.id,i)).length;
+  return `<div class="shead"><div class="wrap">${backBtn("Albums")}<h2>${esc(t.title)}</h2></div></div>
+  <div class="wrap sbody"><div class="stats"><div class="stat" style="background:#DDF5F2"><b style="color:#115E59">${own}</b><span>Owned</span></div><div class="stat"><b>${t.issues.length-own}</b><span>Missing</span></div><div class="stat"><b>${Math.round(own/t.issues.length*100)}%</b><span>Complete</span></div></div>${progBar(own,0,t.issues.length)}
+  <section class="card" style="padding:16px 8px 8px"><div class="slots">${t.issues.map(i=>{ const u=ownerOfIssue(t.id,i); return u?`<button type="button" class="slot" data-open="${u.open}"><span class="ring" style="background:#DDF5F2">${unitFace(u,52)}</span><b style="color:#115E59">${esc(i.year)}${i.mint?" "+esc(i.mint):""}</b><span>${i.mintage?esc(fmtNum(i.mintage)):""}</span></button>`:`<button type="button" class="slot" data-wantissue="${esc(t.id)}|${esc(i.year)}|${esc(i.mint||"")}"><span class="empty-c">+</span><b>${esc(i.year)}${i.mint?" "+esc(i.mint):""}</b><span>${i.mintage?esc(fmtNum(i.mintage)):""}</span></button>`; }).join("")}</div></section>
+  <p class="m0 muted small">Year and mint list from Numista. Tap a gap to put it on your want list.</p></div>`;
+}
 
-// ----- add / edit -----
-function opt(v, label, cur) { return h`<option value="${v}" ${String(cur ?? '') === String(v) ? 'selected' : ''}>${label}</option>`; }
-function scrEdit(id) {
-  const d = doc(), t = today();
-  const isNew = id === 'new';
-  const src = isNew ? null : C.byId(d.bills, id);
-  if (!isNew && !src) return h`${back('#/bills', 'Bill not found')}`;
-  const b = src || { kind: 'household', typeId: 't_household', freq: 'Monthly', payMethod: 'dd', amountMode: 'fixed', status: 'active', review: { applicable: false }, remind: true, amounts: [] };
-  const nd = !isNew ? C.nextDue(b, t) : null;
-  const curAmt = isNew ? '' : (C.baseAmountOn(b, nd || t) ?? '');
-  const types = (d.types || []).filter((x) => !x.del).sort((a, c) => (a.order || 0) - (c.order || 0));
-  const accs = (d.accounts || []).filter((a) => !a.del && a.active !== false);
-  const props = (d.properties || []).filter((p) => !p.del);
-  const people = (d.people || []).filter((p) => !p.del);
-  const others = (d.others || []).filter((o) => !o.del);
-  const radio = (name, v, label, cur) => h`<label class="chip" style="display:inline-flex;align-items:center;justify-content:center;flex:1 1 0;position:relative" ${cur === v ? raw('aria-pressed="true"') : ''}><input type="radio" name="${name}" value="${v}" ${cur === v ? 'checked' : ''} style="position:absolute;opacity:0;inset:0;margin:0;cursor:pointer">${label}</label>`;
-  const inclDefault = typeof b.includeInTotals === 'boolean' ? b.includeInTotals : C.inTotals(b);
-  return h`${back(isNew ? '#/bills' : '#/bill/' + b.id, isNew ? 'Add a bill' : 'Edit bill')}
-  <form data-form="bill" data-id="${isNew ? '' : b.id}" class="stack-lg" novalidate>
-  ${(() => { const dr = getDraft(isNew ? '' : b.id); return dr ? h`<div class="banner amber small row" style="justify-content:space-between;gap:10px"><span>Unfinished ${isNew ? 'bill' : 'changes'} from ${new Date(dr.at).toLocaleString('en-AU', { weekday: 'short', hour: 'numeric', minute: '2-digit' })} — keep going, or</span><button type="button" class="btn small ghost" data-act="draftdiscard" data-id="${isNew ? '' : b.id}">Discard</button></div>` : ''; })()}
-  <div id="formerr"></div>
-  <div class="card pad stack-lg">
-    <label class="field">Bill name<input name="name" value="${b.name || ''}" required autocomplete="off"></label>
-    <div class="stack" style="gap:8px"><span class="field" style="gap:0">Bill type</span><div class="row" style="gap:6px" data-radio>${radio('kind', 'household', 'Household', b.kind)}${radio('kind', 'investment', 'Investment', b.kind)}${radio('kind', 'reminder', 'Reminder only', b.kind)}</div>
-      <span class="xs muted" data-show="kind=household">Your own home and family costs.</span><span class="xs muted" data-show="kind=investment">Kept with the property's rent and costs.</span><span class="xs muted" data-show="kind=reminder">Someone else's bill you look after — alerts and a Paid tick, never in your totals.</span></div>
-    <div class="grid2"><label class="field" data-show="kind=household,investment">Category<select name="typeId">${types.map((x) => opt(x.id, x.name, b.typeId))}</select></label>
-      <label class="field" data-show="kind=investment">Property<select name="propertyId">${opt('', 'Across the portfolio', b.propertyId)}${props.map((p) => opt(p.id, p.name, b.propertyId))}</select></label>
-      <label class="field" data-show="kind=reminder">Paying it for<select name="forWhom">${others.map((o) => opt(o.id, o.name, b.forWhom))}${opt('', '— add on the People screen —', others.length ? b.forWhom : '')}</select></label>
-      <label class="field">Paid from<select name="accountId">${opt('', 'Not set', b.accountId)}${accs.map((a) => opt(a.id, a.name, b.accountId))}</select></label></div>
-    <label class="switch" data-show="kind=household,investment"><span class="stack" style="gap:2px"><b style="font-size:15px">Count in household totals</b><span class="small muted">Upcoming, Calendar, Pay and reports</span></span><input type="checkbox" name="includeInTotals" ${inclDefault ? 'checked' : ''} data-incl-auto="${typeof b.includeInTotals === 'boolean' ? '0' : '1'}"></label>
-  </div>
-  <div class="card pad stack-lg">
-    <div class="grid2"><label class="field">Amount ($)<input class="money" name="amount" type="number" inputmode="decimal" step="0.01" min="0" value="${curAmt}" placeholder="0.00" ${!isNew ? h`data-cur="${curAmt}"` : ''}></label>
-      <label class="field">The amount is<select name="amountMode">${opt('fixed', 'Fixed', b.amountMode)}${opt('usually', 'Usually fixed (estimate)', b.amountMode)}${opt('varies', 'Varies — use last amount', b.amountMode)}${opt('percentPay', 'A % of pay', b.amountMode)}</select></label></div>
-    <div class="grid3" data-show="amountMode=percentPay"><label class="field">% of pay<input name="percent" type="number" step="0.01" min="0" value="${b.percent ?? 1}"></label><label class="field">Whose pay<select name="personId">${people.map((p) => opt(p.id, p.name, b.personId))}</select></label><label class="field">Based on<select name="percentBase">${opt('gross', 'Gross', b.percentBase)}${opt('takeHome', 'Take-home', b.percentBase)}</select></label></div>
-    <span class="xs muted" data-show="amountMode=percentPay">The amount above is used until that pay is entered on the Pay screen.</span>
-    ${!isNew ? h`<label class="field" id="amtfrom" hidden>New amount starts from<input type="date" name="amountFrom" value="${nd || t}"><span class="hint">Only for the price change. Earlier payments keep the old amount, and it shows in the price history. To move the bill's date, change <b>Due date</b> below.</span></label>` : ''}
-    <div class="stack" style="gap:8px"><span class="field" style="gap:0">How often</span><div class="grid3" data-radio>${C.FREQS.map((f) => radio('freq', f, f, b.freq))}</div></div>
-    <div class="grid2"><label class="field">Due date<input type="date" name="refDate" value="${b.refDate || ''}"><span class="hint" data-show="freq!=One-off">Any one due date, past or upcoming — the app works out the rest.</span><span class="hint" data-show="freq=One-off">The date it's due. It's paid once and not repeated.</span></label>
-      <label class="field" data-show="freq!=One-off">Ends on (optional)<input type="date" name="endDate" value="${b.endDate || ''}"><span class="hint">Loan or contract end — stops itself.</span></label></div>
-    ${isNew || C.isISO(b.startDate) ? h`<label class="field" data-show="freq!=One-off">Started<input type="date" name="startDate" value="${b.startDate || t}"><span class="hint">No payments before this date. Paying it a while already? Set an earlier date — those payments show as already paid.</span></label>` : ''}
-    <label class="switch"><span class="stack" style="gap:2px"><b style="font-size:15px">Not started yet</b><span class="small muted">No reminders or totals until you switch this off</span></span><input type="checkbox" name="pending" ${b.status === 'pending' ? 'checked' : ''}></label>
-  </div>
-  <div class="card pad stack-lg">
-    <div class="stack" style="gap:8px"><span class="field" style="gap:0">How it's paid</span><div class="row" style="gap:6px" data-radio>${radio('payMethod', 'dd', 'Direct debit', b.payMethod)}${radio('payMethod', 'manual', 'I pay it', b.payMethod)}${radio('payMethod', 'rent', 'From rent', b.payMethod)}</div>
-      <span class="xs muted" data-show="payMethod=dd">Comes out by itself — ticked as paid on the due date. The alert is a heads-up to have money there.</span><span class="xs muted" data-show="payMethod=manual">Stays on your To pay list until ticked. Reminds you before, on the day, then every morning while overdue.</span><span class="xs muted" data-show="payMethod=rent">Taken out of the rent by the agent. Counted as a cost, no alerts.</span></div>
-    <div class="grid2" data-show="payMethod=manual"><label class="field">BPAY biller code<input name="bpayBiller" inputmode="numeric" value="${(b.bpay && b.bpay.biller) || ''}"></label><label class="field">BPAY reference<input name="bpayRef" inputmode="numeric" value="${(b.bpay && b.bpay.ref) || ''}"></label></div>
-    <label class="switch"><span class="stack" style="gap:2px"><b style="font-size:15px">Day-before transfer from savings</b><span class="small muted">Adds a transfer-day check to tick off</span></span><input type="checkbox" name="transferDayBefore" ${b.transferDayBefore ? 'checked' : ''}></label>
-    <label class="switch"><span class="stack" style="gap:2px"><b style="font-size:15px">Reminders</b><span class="small muted">Include this bill in push alerts</span></span><input type="checkbox" name="remind" ${b.remind === false ? '' : 'checked'}></label>
-  </div>
-  <div class="card pad stack-lg">
-    <div class="grid2"><label class="field">Provider<input name="provider" value="${b.provider || ''}"></label><label class="field">Policy / account #<input name="accountNo" value="${b.accountNo || ''}" autocomplete="off"></label></div>
-    <label class="switch" data-show="freq!=One-off"><span class="stack" style="gap:2px"><b style="font-size:15px">Review this bill yearly</b><span class="small muted">Check you're still on the best deal</span></span><input type="checkbox" name="reviewApplicable" ${b.review && b.review.applicable ? 'checked' : ''}></label>
-    <label class="field" data-show="reviewApplicable=on">Last reviewed<input type="date" name="reviewLast" max="${t}" value="${(b.review && b.review.last) || ''}"></label>
-    <label class="field">Expected change (optional)<input name="expectedChange" value="${b.expectedChange || ''}" placeholder="e.g. new amount at house handover"></label>
-    <label class="field">Notes<textarea name="notes">${b.notes || ''}</textarea></label>
-    <label class="field">Due date(s) as written in the spreadsheet<input name="dueText" value="${b.dueText || ''}"><span class="hint">Only used for the Excel export.</span></label>
-  </div>
-  <button class="btn block" type="submit">${isNew ? 'Add bill' : 'Save changes'}</button>
-  </form>`;
+/* ================= files shared by coins, set coins and receipts ================= */
+function filesOf(c){ const ids=[]; if(!c) return ids; for(const p of (c.photos||[])) if(p&&!p.url) ids.push(p.id); for(const it of (c.setItems||[])) for(const p of (it.photos||[])) if(p&&!p.url) ids.push(p.id); return ids; }
+function fileInUse(id){ return S.coins.some(c=>filesOf(c).includes(id))||S.receipts.some(r=>r.fileId===id); }
+async function dropUnused(ids){ for(const id of new Set(ids)) if(id&&!fileInUse(id)) await dbDel("files",id); }
+
+/* ================= sets: the coins inside a set ================= */
+const pickKeys=(o,ks)=>{ const r={}; for(const k of ks) if(!blank(o[k])) r[k]=o[k]; return r; };
+function itemSub(it){ return [it.denom,it.year,it.mint&&it.mint!=="None"?"Mint "+it.mint:"",it.mintage?"Mintage "+fmtNum(it.mintage):""].filter(Boolean).join(" · "); }
+function itemFace(it,size,rev){ size=size||44; const ph=it.photos||[]; const p=ph.find(p=>p.side==="Reverse")||ph.find(p=>p.side==="Obverse")||ph[0]; return `<div class="face" style="--face:${size}px;width:${size}px;height:${size}px">${p?imgTag(p):drawnCoin({denom:it.denom})}</div>`; }
+function setSec(d){ const c=d.draft, items=c.setItems||[];
+  return `<div class="setin"><div class="flabel" style="display:flex;align-items:center;gap:8px">Coins in this set<span class="muted small" style="font-weight:600">${items.length?items.length+" listed":""}</span></div>
+  ${items.length?`<div class="sitems">${items.map((it,i)=>`<div class="sitem">${itemFace(it,44,true)}<span class="tx"><b>${esc(it.title||"Coin "+(i+1))}</b><span>${esc(itemSub(it)||"Added by hand")}</span></span><button type="button" class="btn sm ghost" data-sirm="${i}" aria-label="Remove ${esc(it.title||"coin")}">×</button></div>`).join("")}</div>`:`<p class="m0 muted small">Add each coin in the set — from Numista for its details and reference photos, or by hand.</p>`}
+  <div class="row">${nsKey()?`<button type="button" class="btn primary" data-siadd>Add coin from Numista</button>`:""}<button type="button" class="btn" data-siman>${d.siManual?"Hide":"Add by hand"}</button></div>
+  ${d.siManual?`<div class="grid2 siman"><div class="field full"><label for="si_title">Coin name</label><input id="si_title" autocomplete="off" placeholder="e.g. Muttaburrasaurus $1"></div><div class="field"><label for="si_year">Year</label><input id="si_year" inputmode="numeric" value="${esc(/^\d{4}$/.test(String(c.year||""))?c.year:"")}"></div><div class="field"><label for="si_mint">Mint / privy mark</label><input id="si_mint" list="dl_mint" autocomplete="off"></div><div class="field full"><label for="si_denom">Denomination</label><select id="si_denom"><option value="">—</option>${DENOMS.map(x=>`<option ${x.k===c.denom?"selected":""}>${x.k}</option>`).join("")}</select></div><div class="full"><button type="button" class="btn primary block" data-siok>Add to set</button></div></div>`:""}
+  ${items.length?"":inp("setCount","Number of coins in the set",c,{num:"numeric",hint:"only if you're not listing them"})}
+  ${inp("setContents","Notes about the set",c,{area:true,ph:"e.g. comes in a presentation box with certificate"})}</div>`; }
+function drawSet(){ const el=$("#setFields"); if(el){ el.innerHTML=setSec(topV()); hydrateImages(el); } }
+function setCard(c){ if(!c.isSet) return ""; const items=c.setItems||[];
+  if(!items.length) return S.readOnly?"":`<div class="todo" style="background:#E0E7FF"><span><b>Coins in this set:</b> list each coin to get its details and count it in albums.</span><button type="button" class="btn sm" data-edit="${c.id}">Add</button></div>`;
+  return `<section class="card"><h3><span class="ico" style="background:#3730A3"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="8" cy="9" r="4"/><circle cx="16" cy="9" r="4"/><circle cx="12" cy="16" r="4"/></svg></span>Coins in this set<span class="sp"></span><span class="muted small">${items.length}</span></h3>
+  <div class="sitems" style="padding-bottom:12px">${(com=>items.map(it=>`<details class="sdet"><summary>${itemFace(it,44,true)}<span class="tx"><b>${esc(setItemLabel(it,com)||"Coin")}</b><span>${esc(itemSub(it))}</span></span></summary><div class="sdbody">${com&&it.title?`<p class="m0 small" style="padding-top:6px">${esc(it.title)}</p>`:""}${(it.photos||[]).length?`<div class="thumbs">${it.photos.map(p=>`<div class="th ref"><button type="button" aria-label="Reference photo, ${esc(p.side||"")}">${imgTag(p,"data-zoom")}<span class="rb">REF · ${esc(shortSrc(p.source))}</span></button></div>`).join("")}</div>`:""}${kv("Composition",it.composition)+kv("Mass",unit(it.mass,"g"))+kv("Diameter",unit(it.diameter,"mm"))+kv("Edge",it.edge)+kv("Effigy",it.effigy)+kv("Reverse designer",it.reverseDesigner)+kv("Series",it.series)}${it.ns?`<p class="m0 small muted" style="padding:8px 0">Data provided by Numista · <a href="${esc(it.ns.url)}" target="_blank" rel="noopener">N# ${esc(it.ns.id)}</a></p>`:""}</div></details>`).join(""))(setCommon(items))}</div></section>`; }
+function setfindHTML(d){ const c=d.target.draft, n=(c.setItems||[]).length;
+  return `<div class="shead"><div class="wrap">${backBtn("Back")}<h2>Add coin to set</h2></div></div>
+  <div class="wrap sbody">
+    <div class="todo" style="background:#E0E7FF"><span><b>${esc(titleOf(c))}</b><br><span class="muted">${n?`${n} coin${n===1?"":"s"} listed so far. `:""}Search for one coin from the set and pick it. Repeat for each coin.</span></span></div>
+    ${nsKey()?nsSearchBlock(d):NS_SETUP}
+  </div>`; }
+async function siLink(d,issue){
+  const t=d.type, tgt=d.target, c=tgt.draft; d.busy="Adding it to the set…"; d.issues=null; drawTop();
+  const o=fromNumista(t,issue);
+  const it={id:uid("si"),...pickKeys(o,["title","denom","year","mint","mintage","composition","mass","diameter","thickness","edge","effigy","reverseDesigner","series"]),ns:nsInfo(t,d.typeIssues),photos:[]};
+  for(const [side,obj] of [["Obverse",t.obverse],["Reverse",t.reverse]]){ const pic=obj&&(obj.picture||obj.thumbnail); if(!pic) continue; const r=await nsImage(pic); if(!r) continue; if(!r.url) tgt.newFiles.push(r.id); it.photos.push({id:r.id,url:r.url,mine:false,side,source:"Numista",link:it.ns.url}); }
+  c.setItems=[...(c.setItems||[]),it]; tgt.lastSetQ=d.q; d.busy="";
+  await popView(); toast(`Added — ${c.setItems.length} coin${c.setItems.length===1?"":"s"} in the set`);
 }
-function updateShows(form) {
-  if (!form) return;
-  const fd = new FormData(form);
-  form.querySelectorAll('[data-show]').forEach((el) => {
-    const neg = el.dataset.show.includes('!=');
-    const [k, vals] = el.dataset.show.split(neg ? '!=' : '=');
-    const v = fd.get(k) ?? '';
-    const hit = vals.split(',').includes(String(v));
-    el.hidden = neg ? hit : !hit;
-  });
-  form.querySelectorAll('[data-radio] label').forEach((l) => { const i = l.querySelector('input'); l.setAttribute('aria-pressed', i.checked ? 'true' : 'false'); });
-  const incl = form.querySelector('[name=includeInTotals]');
-  if (incl && incl.dataset.inclAuto === '1') incl.checked = fd.get('kind') === 'household';
+
+/* ================= packaging ================= */
+function packOptions(extra){ const used=[...new Set(S.coins.map(c=>c.packaging).filter(v=>!blank(v)&&!PACKS.includes(v)&&v!==PACK_OTHER))]; if(extra&&!PACKS.includes(extra)&&extra!==PACK_OTHER&&!used.includes(extra)) used.push(extra); return [...PACKS,...used.sort()]; }
+function packField(d){ const c=d.draft; const opts=[...packOptions(d.packOther?"":c.packaging),PACK_OTHER]; const cur=d.packOther?PACK_OTHER:c.packaging;
+  return `<div class="field"><span class="flabel">Packaging ${infoBtn("packaging")}</span>${pick("packaging",opts,cur)}<input id="f_packOther" ${d.packOther?"":"hidden"} placeholder="Type the packaging, e.g. PNC, Wallet" autocomplete="off" value="${esc(d.packOtherText||"")}" aria-label="Other packaging"></div>`; }
+
+/* ================= statistics by denomination ================= */
+function denomPanel(owned){
+  const rows=new Map(); const row=k=>{ if(!rows.has(k)) rows.set(k,{k,coins:0,records:0,value:0}); return rows.get(k); };
+  for(const c of owned){ const dk=c.denom||"Not recorded"; const r=row(dk); r.records++; if(!blank(c.value)) r.value+=+c.value*qtyOf(c);
+    const items=c.isSet?(c.setItems||[]):[];
+    if(items.length){ for(const it of items) row(it.denom||dk).coins+=qtyOf(c); } else r.coins+=coinsIn(c); }
+  const order=k=>{ const i=DENOMS.findIndex(d=>d.k===k); return i<0?999:i; };
+  const list=[...rows.values()].sort((a,b)=>order(a.k)-order(b.k)); const max=Math.max(1,...list.map(r=>r.coins));
+  return `<div class="panel"><h3>By denomination</h3><div class="dlist">${list.map(r=>{ const d=DENOMS.find(x=>x.k===r.k); const g=GROUPS[d?d.grp:"other"]; return `<div class="drow"><span class="gico" style="background:${g.solid}">${esc(d?d.face:"?")}</span><div class="dmain"><div class="dtop"><b>${esc(r.k)}</b><span class="num">${r.coins} coin${r.coins===1?"":"s"}</span></div><div class="track"><div class="fill" style="width:${r.coins/max*100}%;background:${g.solid}"></div></div><span class="muted small">${r.records?`${r.records} record${r.records===1?"":"s"}`:"in sets"}${r.value?` · value ${aud(Math.round(r.value))}`:""}</span></div></div>`; }).join("")}</div><p class="m0 muted small">Coins counts every coin — duplicates and each coin in a set. Value is your current value for those records.</p></div>`;
 }
-async function saveBillForm(form) {
-  const d = doc(), t = today();
-  const fd = new FormData(form);
-  const id = form.dataset.id;
-  const old = id ? C.byId(d.bills, id) : null;
-  const num = (k) => { const v = fd.get(k); return v === null || v === '' ? null : Number(v); };
-  const kind = fd.get('kind') || 'household';
-  const b = old ? JSON.parse(JSON.stringify(old)) : { id: C.uid('b'), amounts: [], todos: [], review: { applicable: false, log: [] }, status: 'active' };
-  b.name = (fd.get('name') || '').trim();
-  b.kind = kind;
-  b.typeId = kind === 'reminder' ? null : fd.get('typeId') || null;
-  b.propertyId = kind === 'investment' ? fd.get('propertyId') || null : null;
-  b.forWhom = kind === 'reminder' ? fd.get('forWhom') || null : null;
-  b.accountId = fd.get('accountId') || null;
-  const incl = form.querySelector('[name=includeInTotals]');
-  if (kind !== 'reminder' && incl) {
-    const def = kind === 'household';
-    if (incl.checked !== def || typeof b.includeInTotals === 'boolean') b.includeInTotals = incl.checked;
-    if (incl.checked === def && incl.dataset.inclAuto === '1') delete b.includeInTotals;
+
+/* ================= receipts & documents ================= */
+const isPdf=r=>/pdf/i.test((r&&r.type)||"");
+function rcThumb(r){ return isPdf(r)?`<span class="rcthumb rcpdf" aria-label="PDF">PDF</span>`:`<span class="rcthumb"><img data-fid="${esc(r.fileId)}" alt=""></span>`; }
+function rcSummary(r){ return [r.date?fmtDate(r.date):"",r.seller,!blank(r.total)?aud(r.total)+(+r.postage?" incl. "+aud(r.postage)+" postage":""):""].filter(Boolean).join(" · ")||"Receipt (no details yet)"; }
+const rcCoins=id=>S.coins.filter(c=>(c.receiptIds||[]).includes(id));
+const rcAll=()=>S.receipts.slice().sort((a,b)=>String(b.date||(b.addedAt||"").slice(0,10)).localeCompare(String(a.date||(a.addedAt||"").slice(0,10))));
+function rcFind(id){ const t=topV(); return S.receipts.find(r=>r.id===id)||((t&&t.newReceipts)||[]).find(r=>r.id===id)||null; }
+async function storeReceiptFile(file){
+  const pdf=/pdf/i.test(file.type||"")||/\.pdf$/i.test(file.name||"");
+  if(pdf){ if(file.size>20*1048576) throw new Error("That PDF is over 20 MB — too big to keep."); const id=uid("f"); await dbPut("files",{id,blob:file,type:"application/pdf",name:file.name||id+".pdf"}); return {fileId:id,type:"application/pdf",name:file.name||""}; }
+  const blob=await resizeImage(file,2200); const id=uid("f"); await dbPut("files",{id,blob,type:"image/jpeg",name:id+".jpg"}); return {fileId:id,type:"image/jpeg",name:file.name||""};
+}
+function rcNewFields(r){ return `<div class="rcfields"><div class="field"><label for="rd_${r.id}">Receipt date</label><input type="date" id="rd_${r.id}" data-rnf="date" data-rid="${r.id}" value="${esc(r.date||"")}"></div><div class="field"><label for="rs_${r.id}">Seller</label><input id="rs_${r.id}" data-rnf="seller" data-rid="${r.id}" list="dl_source" autocomplete="off" value="${esc(r.seller||"")}" placeholder="e.g. Royal Australian Mint"></div><div class="grid2"><div class="field"><label for="rt_${r.id}">Receipt total (A$)</label><input id="rt_${r.id}" data-rnf="total" data-rid="${r.id}" inputmode="decimal" value="${esc(r.total??"")}" placeholder="whole amount"></div><div class="field"><label for="rp_${r.id}">Postage &amp; fees</label><input id="rp_${r.id}" data-rnf="postage" data-rid="${r.id}" inputmode="decimal" value="${esc(r.postage??"")}" placeholder="0"></div></div><div class="field"><label for="ro_${r.id}">Order / invoice no.</label><input id="ro_${r.id}" data-rnf="orderNo" data-rid="${r.id}" autocomplete="off" value="${esc(r.orderNo||"")}" placeholder="optional"></div></div>`; }
+function rcSec(d){ const c=d.draft; const list=(c.receiptIds||[]).map(rcFind).filter(Boolean);
+  return `<h3><span class="ico" style="background:#0F766E"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"><path d="M6 3h12v18l-3-2-3 2-3-2-3 2z"/><path d="M9 8h6M9 12h6"/></svg></span>Receipts &amp; documents<span class="sp" style="flex:1"></span><span class="muted small">${list.length||""}</span></h3>
+  <div class="row"><button type="button" class="btn primary" data-rcnew>New receipt</button>${S.receipts.some(r=>!(c.receiptIds||[]).includes(r.id))?`<button type="button" class="btn" data-rcuse>Use an existing receipt</button>`:""}</div>
+  <p class="m0 muted small">Photos or PDFs, kept separate from your coin photos. One receipt can cover several coins — link it to each of them.</p>
+  ${list.map(r=>{ const isNew=((d.newReceipts||[]).some(x=>x.id===r.id)); const others=rcCoins(r.id).filter(x=>x.id!==d.id).length;
+    return `<div class="rcitem">${rcThumb(r)}<div class="pc">${isNew?`<b class="small" style="color:#0F766E">New receipt</b>${rcNewFields(r)}`:`<b>${esc(rcSummary(r))}</b><span class="muted small">${others?`Also covers ${others} other coin${others===1?"":"s"}`:"Only this coin so far"}</span>`}<div class="phbtns"><button type="button" class="btn sm" data-rcview="${r.id}">View</button><button type="button" class="btn sm ghost" data-rcun="${r.id}">Unlink</button></div></div></div>`; }).join("")}
+  ${list.some(r=>r.date||r.seller)?`<button type="button" class="btn sm" data-rcfill>Fill empty date &amp; source from receipt</button>`:""}`; }
+function drawRc(){ const el=$("#rcSec"); if(el){ el.innerHTML=rcSec(topV()); hydrateImages(el); } }
+async function addReceiptToEdit(files){ const t=topV(); if(!t||t.kind!=="edit") return; readForm(); const c=t.draft; t.newReceipts=t.newReceipts||[]; let n=0;
+  for(const f of files){ try{ const x=await storeReceiptFile(f); t.newFiles.push(x.fileId); const r={id:uid("rc"),...x,addedAt:new Date().toISOString()}; t.newReceipts.push(r); c.receiptIds=[...(c.receiptIds||[]),r.id]; n++; }catch(e){ toast(e.message||String(e)); } }
+  drawRc(); if(n) toast(n===1?"Receipt added — add its date and seller if you like":`${n} receipts added`); }
+async function viewReceiptFile(r){ if(!r) return; const u=await urlFor(r.fileId); if(!u){ toast("That file isn't on this phone."); return; }
+  if(isPdf(r)){ const a=document.createElement("a"); a.href=u; a.target="_blank"; a.rel="noopener"; document.body.appendChild(a); a.click(); a.remove(); return; }
+  const el=document.createElement("div"); el.id="zoom"; el.innerHTML=`<img src="${u}" alt="Receipt"><button type="button" class="btn">Close</button>`; document.body.appendChild(el); }
+async function saveReceiptFile(r){ const u=await urlFor(r.fileId); if(!u){ toast("That file isn't on this phone."); return; } const base=(r.name||"").replace(/\.[a-z0-9]+$/i,"")||("receipt-"+(r.date||todayISO())); const a=document.createElement("a"); a.href=u; a.download=base+(isPdf(r)?".pdf":".jpg"); document.body.appendChild(a); a.click(); a.remove(); toast("Saved — check your Downloads"); }
+function fillFromReceipt(c,r,isNewCoin){ let n=0; if(r.date&&(blank(c.acqDate)||(isNewCoin&&c.acqDate===todayISO()))){ c.acqDate=r.date; n++; } if(r.seller&&blank(c.source)){ c.source=r.seller; n++; } if(blank(c.acqHow)){ c.acqHow="Bought"; n++; } return n; }
+function rcpickHTML(d){ const linked=new Set(d.target.draft.receiptIds||[]); const list=rcAll().filter(r=>!linked.has(r.id));
+  return `<div class="shead"><div class="wrap">${backBtn("Back")}<h2>Use an existing receipt</h2></div></div>
+  <div class="wrap sbody">${list.length?`<div class="listbox">${list.map(r=>{ const n=rcCoins(r.id).length; return `<button type="button" class="rcrow" data-rcpick="${r.id}">${rcThumb(r)}<span class="tx"><b>${esc(rcSummary(r))}</b><span>${n?`Covers ${n} coin${n===1?"":"s"}`:"Not linked to any coins"}</span></span></button>`; }).join("")}</div>`:`<div class="empty"><b>No other receipts</b><span>Add a new one with "New receipt".</span></div>`}</div>`; }
+function linkRows(d,list){ return list.map(c=>`<label class="ckrow"><input type="checkbox" data-rck="${c.id}" ${d.sel.has(c.id)?"checked":""}>${faceHTML(c).replace('class="face"','class="face" style="--face:36px;width:36px;height:36px"')}<span class="tx"><b>${esc(titleOf(c))}</b><span>${esc([c.denom,c.year,c.isSet?"Set of "+setSize(c):""].filter(Boolean).join(" · "))}</span></span></label>`).join("")||`<p class="muted small" style="padding:8px">No coins match.</p>`; }
+function linkList(d){ return sorted(S.coins.filter(c=>matchQuery(c,d.lq||"")).slice()); }
+function receiptHTML(d){
+  const r=S.receipts.find(x=>x.id===d.id); if(!r) return `<div class="shead"><div class="wrap">${backBtn("Back")}<h2>Receipt</h2></div></div><div class="wrap sbody"><div class="empty"><b>This receipt was deleted</b></div></div>`;
+  const coins=rcCoins(r.id);
+  return `<div class="shead"><div class="wrap">${backBtn("Back")}<h2>Receipt</h2></div></div>
+  <div class="wrap sbody">${datalists()}
+    <section class="card" style="padding:14px">${isPdf(r)?`<div class="stage ref" style="flex-direction:column;gap:10px"><span class="rcthumb rcpdf" style="width:84px;height:104px;font-size:20px">PDF</span><span class="muted small">${esc(r.name||"PDF document")}</span></div>`:`<div class="stage ref"><img data-fid="${esc(r.fileId)}" alt="Receipt" data-zoom></div>`}
+      <div class="row" style="margin-top:10px"><button type="button" class="btn" data-rcfile="${r.id}">${isPdf(r)?"Open PDF":"View full size"}</button><button type="button" class="btn" data-rcdl="${r.id}">Save to phone</button></div></section>
+    <section class="fsec"><h3>Details</h3>
+      <div class="field"><label for="rv_date">Receipt date</label><input type="date" id="rv_date" value="${esc(r.date||"")}"></div>
+      <div class="field"><label for="rv_seller">Seller</label><input id="rv_seller" list="dl_source" autocomplete="off" value="${esc(r.seller||"")}"></div>
+      <div class="grid2"><div class="field"><label for="rv_total">Receipt total (A$)</label><input id="rv_total" inputmode="decimal" value="${esc(r.total??"")}"></div><div class="field"><label for="rv_post">Postage &amp; fees (A$)</label><input id="rv_post" inputmode="decimal" value="${esc(r.postage??"")}" placeholder="0"></div></div>
+      <p class="m0 muted small" style="margin-top:-4px">Receipt total is the whole amount you paid, including postage.</p>
+      <div class="field"><label for="rv_order">Order / invoice no.</label><input id="rv_order" autocomplete="off" value="${esc(r.orderNo||"")}"></div>
+      <div class="field"><label for="rv_notes">Notes</label><textarea id="rv_notes">${esc(r.notes||"")}</textarea></div>
+      <button type="button" class="btn primary" data-rcsave="${r.id}">Save details</button></section>
+    <section class="fsec"><h3>Coins on this receipt<span class="sp" style="flex:1"></span><span class="muted small">${coins.length}</span></h3>
+      ${coins.length?`<div class="listbox">${coins.map(c=>{ const q=qtyOf(c), cv=covOf(c,r.id), pe=postageEach(c), ce=costEach(c); return `<div class="rcc"><button type="button" class="rccmain" data-open="${c.id}">${faceHTML(c).replace('class="face"','class="face" style="--face:40px;width:40px;height:40px"')}<span class="tx"><b>${esc(titleOf(c))}</b><span>${esc([c.year,q>1?"Qty "+q:"",blank(c.price)?"No price yet":aud(priceAUD(c)??c.price)+" each"+(pe>0&&ce!=null?" + "+aud(Math.round(pe*100)/100)+" postage = "+aud(ce):"")].filter(Boolean).join(" · "))}</span></span></button><button type="button" class="btn sm ghost rcx" data-rcunc="${c.id}" aria-label="Unlink ${esc(titleOf(c))}">×</button>${q>1?`<div class="rccov"><span>This receipt covers</span><div class="mini" role="group" aria-label="How many on this receipt"><button type="button" data-rccov="${c.id}|-1" aria-label="Fewer" ${cv<=1?"disabled":""}>−</button><b>${cv}</b><button type="button" data-rccov="${c.id}|1" aria-label="More" ${cv>=q?"disabled":""}>+</button></div><span>of ${q}</span></div>`:""}</div>`; }).join("")}</div>`:`<p class="m0 muted">Not linked to any coins yet.</p>`}
+      ${d.linking?`<div class="panel" style="padding:12px;box-shadow:none;border:1px solid var(--line)"><div class="field"><label for="rlq">Find coins</label><input id="rlq" type="search" autocomplete="off" value="${esc(d.lq||"")}" placeholder="e.g. 2022 dinosaurs"></div><div class="cklist" id="rlList">${linkRows(d,linkList(d))}</div><label class="check-inline"><input type="checkbox" id="rlFill" ${d.fill!==false?"checked":""}><span>Fill empty date acquired and source from this receipt</span></label><div class="row"><button type="button" class="btn primary" data-rclsave>Save links</button><button type="button" class="btn ghost" data-rclcancel>Cancel</button></div></div>`:`<button type="button" class="btn" data-rclink>Link to more coins</button>`}
+      ${coins.length&&(r.date||r.seller)&&!d.linking?`<button type="button" class="btn" data-rcfillall="${r.id}">Fill empty date &amp; source on these coins</button>`:""}
+      ${!d.linking?splitHTML(r,d):""}
+    </section>
+    <button type="button" class="btn danger" data-rcdel="${r.id}" ${coins.length?"disabled":""}>${d.confirmDel?"Tap again to delete":"Delete receipt"}</button>${coins.length?`<p class="m0 muted small">A receipt can only be deleted once no coins are linked to it.</p>`:""}
+  </div>`;
+}
+function viewReceipts(){ const list=rcAll();
+  return `<section class="view">${backMore}<div class="panel"><h3>Receipts &amp; documents</h3><p class="m0">Every receipt and document, newest first. One receipt can cover several coins.</p><div class="row"><button type="button" class="btn primary" data-rcnewstd>New receipt</button></div></div>
+  ${list.length?`<div class="listbox">${list.map(r=>{ const n=rcCoins(r.id).length; return `<button type="button" class="rcrow" data-rcopen="${r.id}">${rcThumb(r)}<span class="tx"><b>${esc(rcSummary(r))}</b><span>${n?`${n} coin${n===1?"":"s"}`:"Not linked to any coins"}</span></span></button>`; }).join("")}</div>`:`<div class="empty"><b>No receipts yet</b><span>Add one here, or from a coin's Edit screen.</span></div>`}</section>`; }
+function rcCard(c){ const list=(c.receiptIds||[]).map(id=>S.receipts.find(r=>r.id===id)).filter(Boolean); if(!list.length) return "";
+  return `<section class="card"><h3><span class="ico" style="background:#0F766E"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"><path d="M6 3h12v18l-3-2-3 2-3-2-3 2z"/><path d="M9 8h6M9 12h6"/></svg></span>Receipts &amp; documents<span class="sp"></span><span class="muted small">${list.length}</span></h3><div class="rclist" style="padding-bottom:12px">${list.map(r=>{ const n=rcCoins(r.id).length; return `<button type="button" class="rcrow" data-rcopen="${r.id}">${rcThumb(r)}<span class="tx"><b>${esc(rcSummary(r))}</b><span>${n>1?`Covers ${n} coins`:"This coin only"}</span></span></button>`; }).join("")}</div></section>`; }
+async function createStdReceipt(file){ try{ const x=await storeReceiptFile(file); const r={id:uid("rc"),...x,addedAt:new Date().toISOString(),updatedAt:new Date().toISOString()}; await dbPut("receipts",r); await reload(); render(); openView({kind:"receipt",id:r.id,linking:true,sel:new Set(),fill:true}); toast("Receipt saved — tick the coins it covers"); }catch(e){ toast(e.message||String(e)); } }
+
+/* ================= insurance report ================= */
+const RANK=["Obverse","Reverse","Card / packaging","Edge","Slab label","Other"];
+function ownForReport(c){ const own=(c.photos||[]).filter(p=>p.mine&&!p.url&&p.side!=="Certificate"); const rk=p=>{ const i=RANK.indexOf(p.side||"Other"); return i<0?RANK.length:i; }; const cv=own.find(p=>p.id===c.coverId&&p.side!=="Other"); return [...(cv?[cv]:[]),...own.filter(p=>p!==cv).sort((a,b)=>rk(a)-rk(b))]; }
+function refForReport(c){ const rk=p=>p.side==="Obverse"?0:p.side==="Reverse"?1:2; let r=(c.photos||[]).filter(p=>!p.mine).sort((a,b)=>rk(a)-rk(b)); if(!r.length) for(const it of (c.setItems||[])) r=r.concat((it.photos||[]).slice().sort((a,b)=>rk(a)-rk(b))); return r; }
+function pickN(list,n){ if(n<2||list.length<2) return list.slice(0,1); const a=list[0]; return [a,list.find(p=>p!==a&&p.side!==a.side)||list[1]]; }
+async function imgData(p){ if(!p) return null; try{ let blob; if(p.url){ const r=await fetch(p.url,{mode:"cors"}); if(!r.ok) return null; blob=await r.blob(); } else { const f=await dbGet("files",p.id); if(!f) return null; blob=f.blob; } if(!/^image\//.test(blob.type||"image/")) return null; const bmp=await createImageBitmap(blob); const S2=240, cv=document.createElement("canvas"); cv.width=S2; cv.height=S2; const x=cv.getContext("2d"); x.fillStyle="#fff"; x.fillRect(0,0,S2,S2); const s=Math.max(S2/bmp.width,S2/bmp.height); x.drawImage(bmp,(S2-bmp.width*s)/2,(S2-bmp.height*s)/2,bmp.width*s,bmp.height*s); return cv.toDataURL("image/jpeg",0.8); }catch{ return null; } }
+function viewReport(){ const o=S.rep||(S.rep={photos:true,two:false,ref:true,sold:false,by:""}); if(o.two===undefined) o.two=false; if(o.ref===undefined) o.ref=true;
+  const list=S.coins.filter(c=>o.sold||isOwned(c)); const none=list.filter(c=>!ownForReport(c).length); const otherOnly=list.filter(c=>{ const p=ownForReport(c); return p.length&&p.every(x=>x.side==="Other"); });
+  return `<section class="view">${backMore}<div class="panel"><h3>Insurance report</h3><p class="m0">A PDF listing of your coins with photos, grade, quantity, price paid, current value and where each is kept, with totals. Save it, open it, or share it straight to email or Drive.</p>
+  <label class="check-inline"><input type="checkbox" id="rPhotos" ${o.photos?"checked":""}><span>Include photos of my coins</span></label>
+  <label class="check-inline"><input type="checkbox" id="rTwo" ${o.two?"checked":""} ${o.photos?"":"disabled"}><span>Two photos per coin (front and back, or the card)</span></label>
+  <label class="check-inline"><input type="checkbox" id="rRef" ${o.ref?"checked":""} ${o.photos?"":"disabled"}><span>If there's no photo of mine, use the reference image — clearly labelled as not my coin</span></label>
+  <label class="check-inline"><input type="checkbox" id="rSold" ${o.sold?"checked":""}><span>Include sold and traded coins</span></label>
+  <div class="field"><label for="rBy">Prepared for (optional)</label><input id="rBy" value="${esc(o.by)}" placeholder="e.g. Home &amp; contents insurer"></div>
+  ${o.photos&&none.length?`<div class="todo"><span><b>${none.length} coin${none.length===1?" has":"s have"} no photos of your own.</b> ${o.ref?"They'll use labelled reference images where there is one.":"They'll show “No owner photo”."}</span><button type="button" class="btn sm" data-shownophoto>Show them</button></div>`:""}
+  ${o.photos&&otherOnly.length?`<div class="todo"><span>${otherOnly.length} coin${otherOnly.length===1?" only has a photo":"s only have photos"} labelled “Other”. If that's a receipt, open the coin › Edit › <b>Move to receipts</b>.</span></div>`:""}
+  <button type="button" class="btn primary" data-mkreport>Create PDF</button><div class="row" id="repOut"></div></div></section>`; }
+function loadJsPDF(){ if(window.jspdf) return Promise.resolve(); return new Promise((res,rej)=>{ const sc=document.createElement("script"); sc.src="jspdf.umd.min.js"; sc.onload=()=>res(); sc.onerror=()=>rej(new Error("Couldn't load the PDF maker — open the app once while online, then try again.")); document.head.appendChild(sc); }); }
+const pdfTxt=t=>String(t??"").replace(/[–—]/g,"-").replace(/[‘’]/g,"'").replace(/[“”]/g,'"').replace(/×/g,"x").replace(/…/g,"...").replace(/[^\x20-\x7E\xA0-\xFF\n]/g,"");
+async function makeReport(){
+  const o=S.rep, out=$("#repOut"), say=m=>{ if(out) out.innerHTML=`<span class="muted small">${esc(m)}</span>`; };
+  say("Making the PDF…"); await loadJsPDF();
+  const list=sorted(S.coins.filter(c=>o.sold||isOwned(c)).slice());
+  const totP=list.reduce((a,c)=>{ const p=costEach(c); return a+(p==null?0:p*qtyOf(c)); },0), totPost=list.reduce((a,c)=>a+(priceAUD(c)==null?0:postageTotal(c)),0), totV=list.reduce((a,c)=>a+(blank(c.value)?0:+c.value*qtyOf(c)),0), nCoins=list.reduce((a,c)=>a+coinsIn(c),0);
+  const { jsPDF }=window.jspdf; const doc=new jsPDF({unit:"mm",format:"a4"}); const W=210, M=14, BOT=283;
+  const PW=o.photos?(o.two?27:14):0, COINW=86-PW;
+  const cols=[...(o.photos?[["",PW]]:[]),["Coin",COINW],["Grade",18],["Qty",10],["Cost each",21],["Value each",21],["Kept in",26]];
+  let y=M, anyRef=false;
+  doc.setFont("helvetica","bold"); doc.setFontSize(16); doc.setTextColor(49,46,129); doc.text("Coin collection - insurance listing",M,y+5); y+=10;
+  doc.setFont("helvetica","normal"); doc.setFontSize(9.5); doc.setTextColor(60,60,60);
+  const sub=pdfTxt(`${o.by?"Prepared for "+o.by+"  ·  ":""}${fmtDate(todayISO())}  ·  ${list.length} records, ${nCoins} coins  ·  Total cost ${aud(Math.round(totP))||"$0"}${totPost?" (incl. postage "+aud(Math.round(totPost))+")":""}  ·  Current value ${aud(Math.round(totV))||"$0"}`);
+  doc.text(doc.splitTextToSize(sub,W-2*M),M,y+3); y+=9;
+  const head=()=>{ doc.setFillColor(238,242,255); doc.rect(M,y,W-2*M,7,"F"); doc.setFont("helvetica","bold"); doc.setFontSize(8.5); doc.setTextColor(49,46,129); let x=M+1.5; for(const [h,w] of cols){ doc.text(h,x,y+4.8); x+=w; } y+=8; doc.setFont("helvetica","normal"); doc.setTextColor(20,20,20); };
+  head(); let n=0;
+  for(const c of list){
+    if(out&&++n%5===0) say(`Adding coin ${n} of ${list.length}…`);
+    const coinW=COINW-4, keptW=26-3;
+    let pics=[], isRef=false;
+    if(o.photos){ let cand=pickN(ownForReport(c),o.two?2:1); if(!cand.length&&o.ref){ cand=pickN(refForReport(c),o.two?2:1); isRef=cand.length>0; } for(const p of cand){ const dt=await imgData(p); if(dt) pics.push(dt); } if(!pics.length) isRef=false; if(isRef) anyRef=true; }
+    const det=[c.denom,c.year,c.mint&&c.mint!=="None"?"Mint "+c.mint:"",c.packaging,c.isSet?"Set of "+setSize(c):"",c.serial?"Serial "+c.serial:""].filter(Boolean).join(" · ");
+    const items=c.isSet?(c.setItems||[]):[]; let contains=items.length?"Contains: "+items.map(it=>it.title||"").filter(Boolean).join("; "):""; if(contains.length>240) contains=contains.slice(0,237)+"...";
+    doc.setFont("helvetica","bold"); doc.setFontSize(9); const tl=doc.splitTextToSize(pdfTxt(titleOf(c)),coinW); doc.setFont("helvetica","normal");
+    const gtxt=gradeText(c)||({"Uncirculated":"UNC","Frosted uncirculated":"Frosted UNC","Circulating":"Circulating","Specimen":"Specimen","Proof":"Proof"}[c.finish]||""); doc.setFontSize(8.5); const gl=doc.splitTextToSize(pdfTxt(gtxt),16);
+    doc.setFontSize(8); const dl=det?doc.splitTextToSize(pdfTxt(det),coinW):[]; const cl=contains?doc.splitTextToSize(pdfTxt(contains),coinW):[]; const rl=isRef?doc.splitTextToSize("Photo: reference image - not the owner's coin",coinW):[]; const kl=doc.splitTextToSize(pdfTxt(c.storage||""),keptW);
+    const h=Math.max(o.photos?15:9, tl.length*3.9+(dl.length+cl.length+rl.length)*3.4+4, kl.length*3.4+4, gl.length*3.6+4);
+    if(y+h>BOT){ doc.addPage(); y=M; head(); }
+    let x=M+1.5;
+    if(o.photos){ pics.forEach((dt,i)=>doc.addImage(dt,"JPEG",x+i*13,y+1,12,12)); if(!pics.length){ doc.setFontSize(6.5); doc.setTextColor(150,150,150); doc.text(doc.splitTextToSize("No owner photo",PW-3),x,y+5); doc.setTextColor(20,20,20); } x+=PW; }
+    doc.setFont("helvetica","bold"); doc.setFontSize(9); doc.text(tl,x,y+4); doc.setFont("helvetica","normal"); doc.setFontSize(8);
+    let ly=y+4+tl.length*3.9; doc.setTextColor(90,90,90); if(dl.length){ doc.text(dl,x,ly); ly+=dl.length*3.4; } if(cl.length){ doc.text(cl,x,ly); ly+=cl.length*3.4; } if(rl.length){ doc.setTextColor(146,64,14); doc.setFont("helvetica","italic"); doc.text(rl,x,ly); doc.setFont("helvetica","normal"); } doc.setTextColor(20,20,20);
+    x+=COINW; doc.setFontSize(8.5);
+    const pa=costEach(c);
+    doc.text(gl,x,y+4); x+=18;
+    for(const [val,w] of [[String(qtyOf(c)),10],[pa!=null?aud(pa):"",21],[blank(c.value)?"":aud(c.value),21]]){ doc.text(pdfTxt(val),x,y+4); x+=w; }
+    doc.setFontSize(8); doc.text(kl,x,y+4);
+    y+=h; doc.setDrawColor(225,228,236); doc.line(M,y,W-M,y); y+=1;
   }
-  b.amountMode = fd.get('amountMode') || 'fixed';
-  if (b.amountMode === 'percentPay') { b.percent = num('percent'); b.personId = fd.get('personId'); b.percentBase = fd.get('percentBase'); }
-  const newAmt = num('amount');
-  const curAmt = old ? C.baseAmountOn(old, fd.get('amountFrom') || t) : null;
-  let amountNote = '';
-  if (newAmt !== null && (!old || !b.amounts.length)) b.amounts = [{ id: C.uid('am'), from: '2000-01-01', amount: newAmt, note: 'Added ' + C.fmtDate(t, { year: true, dow: false }) }];
-  else if (newAmt !== null && newAmt !== curAmt) {
-    const from = fd.get('amountFrom') || t;
-    b.amounts = b.amounts.filter((a) => a.from !== from);
-    b.amounts.push({ id: C.uid('am'), from, amount: newAmt, note: 'Changed by ' + who() });
-    amountNote = ' (' + C.money(curAmt) + ' → ' + C.money(newAmt) + ' from ' + C.fmtDate(from, { dow: false, year: true }) + ')';
-  }
-  b.freq = fd.get('freq');
-  b.refDate = fd.get('refDate') || null;
-  b.endDate = fd.get('endDate') || null;
-  if (b.freq === 'One-off') { b.endDate = null; b.startDate = null; if (!old) b.addedOn = null; }
-  else if (form.querySelector('[name=startDate]')) b.startDate = C.isISO(fd.get('startDate')) ? fd.get('startDate') : (old ? old.startDate || null : t);
-  if (!old && b.freq !== 'One-off') b.addedOn = t;
-  const pending = fd.get('pending') === 'on';
-  if (pending) b.status = 'pending'; else if (b.status === 'pending') b.status = 'active';
-  b.payMethod = fd.get('payMethod') || 'dd';
-  b.bpay = { biller: (fd.get('bpayBiller') || '').trim(), ref: (fd.get('bpayRef') || '').trim() };
-  b.transferDayBefore = fd.get('transferDayBefore') === 'on';
-  b.remind = fd.get('remind') === 'on';
-  b.provider = (fd.get('provider') || '').trim();
-  b.accountNo = (fd.get('accountNo') || '').trim();
-  b.review = b.review || { log: [] };
-  b.review.applicable = fd.get('reviewApplicable') === 'on';
-  b.review.last = fd.get('reviewLast') || b.review.last || null;
-  b.expectedChange = (fd.get('expectedChange') || '').trim();
-  b.notes = (fd.get('notes') || '').trim();
-  b.dueText = (fd.get('dueText') || '').trim();
-  const errs = C.validateBill(b, t);
-  if (newAmt === null && !pending && b.amountMode !== 'percentPay') errs.push('Add the amount (or tick "Not started yet").');
-  if (errs.length) { form.querySelector('#formerr').innerHTML = h`<div class="banner red">${errs.join(' ')}</div>`.toString(); form.querySelector('#formerr').scrollIntoView({ block: 'center' }); return; }
-  if (old && old.accountId !== b.accountId && old.accountId && b.payMethod !== 'manual') {
-    b.todos = (b.todos || []).concat([{ id: C.uid('td'), text: 'Tell ' + (b.provider || 'the provider') + ' about the new account (' + C.accountName(d, b.accountId) + ')', done: false }]);
-  }
-  touch(b);
-  await commit((old ? 'Edited ' : 'Added ') + b.name + amountNote, (dd) => {
-    if (old) dd.bills = dd.bills.map((x) => (x.id === b.id ? b : x)); else dd.bills.push(b);
-    if (old && old.payMethod !== b.payMethod) dd.settings.payCheckPending = (dd.settings.payCheckPending || []).filter((x) => x !== b.id);
-  });
-  clearDraft(id);
-  location.hash = '#/bill/' + b.id;
-  toast(old ? 'Saved' : 'Bill added');
+  if(y+12>BOT){ doc.addPage(); y=M; }
+  doc.setFont("helvetica","bold"); doc.setFontSize(10); doc.text(pdfTxt(`Totals: ${nCoins} coins  ·  Total cost ${aud(Math.round(totP))||"$0"}  ·  Current value ${aud(Math.round(totV))||"$0"}`),M,y+6);
+  const pages=doc.getNumberOfPages(); for(let i=1;i<=pages;i++){ doc.setPage(i); doc.setFont("helvetica","normal"); doc.setFontSize(7.5); doc.setTextColor(120,120,120); doc.text(pdfTxt(`Cost each = price paid plus a share of any postage. Values are the owner's own estimates.${anyRef?" Photos marked as reference images are catalogue pictures, not the owner's coin.":""} MyMint ${APP_VERSION}  ·  Page ${i} of ${pages}`),M,292,{maxWidth:W-2*M}); }
+  const blob=doc.output("blob"), name=`mymint-insurance-report-${todayISO()}.pdf`, url=URL.createObjectURL(blob);
+  const canShare=!!(navigator.canShare&&navigator.canShare({files:[new File([blob],name,{type:"application/pdf"})]}));
+  S._repFile=new File([blob],name,{type:"application/pdf"});
+  if(out) out.innerHTML=`<a class="btn primary" href="${url}" download="${esc(name)}">Save PDF to phone</a><a class="btn" href="${url}" target="_blank" rel="noopener">Open PDF</a>${canShare?`<button type="button" class="btn" data-sharerep>Share…</button>`:""}<span class="muted small">${pages} page${pages===1?"":"s"} · ${(blob.size/1024).toFixed(0)} KB</span>`;
 }
 
-// ----- pay -----
-function scrPay() {
-  const d = doc(), t = today();
-  const people = (d.people || []).filter((p) => !p.del);
-  const pds = C.paydays(d.settings, t, C.addDays(t, 60));
-  const prev = C.paydays(d.settings, C.addDays(t, -13), t);
-  const cur = prev.length ? prev[prev.length - 1] : pds[0];
-  const periods = cur ? [0, 1, 2].map((k) => { const p = C.addDays(cur, 14 * k), e = C.addDays(p, 13); const items = C.schedule(d, p, e, t, (b) => b.status !== 'pending'); return { p, e, hh: C.sumAmounts(items.filter((i) => C.inTotals(i.bill))), n: items.filter((i) => C.inTotals(i.bill)).length, inv: C.sumAmounts(items.filter((i) => i.group === 'investment')), pay: payIn(p) }; }) : [];
-  const ovs = (d.payOverrides || []).filter((o) => !o.del && o.date >= C.addDays(t, -30)).sort((a, b) => (a.date < b.date ? -1 : 1));
-  return h`${back('#/settings', 'Pay & paydays')}
-  <form data-form="payday" class="card pad stack"><div class="stack" style="gap:2px"><h3>Payday</h3><span class="small muted">You're both paid every second ${d.settings.payday && d.settings.payday.base ? C.dowName(C.dow(d.settings.payday.base), true) : 'week'} on the same day.</span></div>
-    <label class="field">Any one payday<input type="date" name="base" value="${(d.settings.payday && d.settings.payday.base) || ''}"></label>
-    <div class="chips">${pds.slice(0, 4).map((p, i) => h`<span class="pill ${i === 0 ? 'green' : 'grey'}" style="padding:4px 10px">${C.fmtDate(p)}</span>`)}</div>
-    <button class="btn small sec" type="submit" style="align-self:flex-start">Save payday</button></form>
-  ${people.map((p) => { const cp = C.payOn(p, t) || {}; return h`<form data-form="pay" data-id="${p.id}" class="card pad stack"><h3>${p.name}</h3>
-    <div class="grid2"><label class="field">Take-home each fortnight<input class="money" name="takeHome" type="number" step="0.01" inputmode="decimal" value="${cp.takeHome ?? ''}" placeholder="Enter amount"></label><label class="field">Gross (optional)<input class="money" name="gross" type="number" step="0.01" inputmode="decimal" value="${cp.gross ?? ''}" placeholder="For % of pay bills"></label></div>
-    <label class="field">Starts from payday<select name="from">${(cur ? [cur, ...pds.filter((x) => x !== cur)] : pds).slice(0, 6).map((x) => opt(x, C.fmtDate(x, { year: true }), cur))}</select><span class="hint">Pay changed for good? Enter the new amount and the payday it starts. Earlier fortnights keep the old figure.</span></label>
-    <button class="btn small sec" type="submit" style="align-self:flex-start">Save ${p.name}'s pay</button>
-    ${(p.pays || []).filter((x) => !x.del).length ? h`<div class="xs muted">${p.pays.filter((x) => !x.del).sort((a, b) => (a.from < b.from ? 1 : -1)).slice(0, 4).map((x) => 'From ' + C.fmtDate(x.from, { year: true, dow: false }) + ': ' + C.money(x.takeHome) + (x.gross ? ' (gross ' + C.money(x.gross) + ')' : '')).join(' · ')}</div>` : ''}</form>`; })}
-  <div class="card pad stack"><div class="between"><h3>One-off changes</h3><button class="btn small" data-act="payoverride">Add</button></div><span class="small muted">Overtime, leave loading, unpaid leave — change one payday without touching the usual amount.</span>
-    ${ovs.length ? h`<div class="list">${ovs.map((o) => h`<div class="item" style="padding-left:0"><span class="grow stack" style="gap:2px"><span class="t">${byIdName(d.people, o.personId)} · ${C.fmtDate(o.date, { year: true })}</span><span class="s">${o.takeHome !== undefined && o.takeHome !== null ? 'Take-home ' + C.money(o.takeHome) : ''}${o.gross ? ' · gross ' + C.money(o.gross) : ''}${o.note ? ' · ' + o.note : ''}</span></span><button class="btn small ghost" data-act="deloverride" data-id="${o.id}">Remove</button></div>`)}</div>` : h`<div class="card dashed empty">None yet</div>`}</div>
-  <div class="stack" style="gap:8px"><h2 style="padding:0 2px">Next three paydays</h2>
-  ${periods.map((x) => h`<div class="card pad stack"><b>${C.fmtDate(x.p)} → ${C.fmtDate(x.e)}</b><div class="grid3"><div class="stack" style="gap:2px"><span class="xs muted">Pay in</span><span class="mono" style="font-weight:600">${x.pay === null ? '—' : C.money(x.pay)}</span></div><div class="stack" style="gap:2px"><span class="xs muted">Household bills</span><span class="mono" style="font-weight:600">${C.money(x.hh)}</span></div><div class="stack" style="gap:2px"><span class="xs muted">Left over</span><span class="mono" style="font-weight:600;color:${x.pay === null ? 'inherit' : x.pay - x.hh < 0 ? 'var(--red)' : '#1B6B3A'}">${x.pay === null ? '—' : C.money(x.pay - x.hh)}</span></div></div>
-    <div class="xs" style="color:var(--inv-ink);border-top:1px solid var(--line2);padding-top:8px">${x.n} household payments · investment properties (not counted): ${C.money(x.inv)}</div></div>`)}</div>`;
-}
-
-// ----- transfers -----
-function scrTransfers() {
-  const d = doc(), t = today();
-  const up = C.transfers(d, t, C.addDays(t, 21), t);
-  const past = C.transfers(d, C.addDays(t, -14), C.addDays(t, -1), t).filter((x) => !d.trackedFrom || x.date >= d.trackedFrom).reverse();
-  const linked = C.liveBills(d).filter((b) => b.transferDayBefore && b.status === 'active');
-  const accIds = [...new Set(linked.map((b) => b.accountId).filter(Boolean))];
-  const prev = C.paydays(d.settings, C.addDays(t, -13), t);
-  const cur = prev.length ? prev[prev.length - 1] : null;
-  const fns = cur ? [0, 1, 2].map((k) => { const p = C.addDays(cur, 14 * k), e = C.addDays(p, 13); return { p, e, v: C.sumAmounts(C.schedule(d, p, e, t, (b) => accIds.includes(b.accountId) && b.status === 'active')) }; }) : [];
-  const annual = C.round2(C.liveBills(d).filter((b) => accIds.includes(b.accountId) && b.status === 'active').reduce((a, b) => a + C.annualAmount(b, t, d), 0));
-  const row = (tr) => h`<div class="card row" style="padding:12px 12px 12px 16px"><span class="grow stack" style="gap:3px"><span class="between"><b>${C.fmtDate(tr.date)} · for ${C.fmtDate(C.addDays(tr.date, 1))}</b><span class="mono" style="font-weight:600">${C.money(tr.total)}</span></span><span class="small muted">${tr.items.map((i) => i.bill.name + ' ' + (C.isEstimate(i.bill) ? '≈' : '') + C.money(i.amount)).join(' · ')}</span>${tr.check ? h`<span class="xs" style="color:#1B6B3A">Ticked by ${tr.check.by}</span>` : ''}</span>
-    <button class="tick ${tr.check ? 'on' : ''}" data-act="trtick" data-date="${tr.date}" aria-label="Transfer done">${icon('check', 18, 2.4)}</button></div>`;
-  return h`${back('#/settings', 'Savings transfers')}
-  <div class="row wrap small" style="gap:6px;font-weight:600"><span class="pill grey" style="padding:6px 10px">Revolut savings</span><span class="muted">→ 1 day before →</span><span class="pill grey" style="padding:6px 10px">${accIds.map((x) => C.accountName(d, x)).join(' / ') || 'personal'}</span><span class="muted">→</span><span class="pill grey" style="padding:6px 10px">Direct debit</span></div>
-  <div class="small" style="color:var(--ink2);line-height:1.45">Each linked bill (${linked.length}) has an automatic transfer the day before it's due, so the money earns interest until the last moment. Tick each transfer once you've seen it go through. Switch a bill on or off in its edit screen.</div>
-  <div class="eyebrow">Next transfers</div>${up.length ? up.map(row) : emptyCard('No transfers in the next 3 weeks.')}
-  ${past.length ? h`<div class="eyebrow">Last two weeks</div>${past.map(row)}` : ''}
-  <form data-form="trset" class="card" style="padding:4px 16px"><label class="switch" style="padding:14px 0;border-bottom:1px solid var(--line2)"><span class="stack" style="gap:2px"><b style="font-size:15px">Transfer-day alert</b><span class="small muted">7:00 am on the day, with the amount</span></span><input type="checkbox" name="transferCheck" ${d.settings.reminders.transferCheck !== false ? 'checked' : ''} data-autosave></label>
-    <div class="stack" style="padding:14px 0;gap:2px"><b style="font-size:15px">If not ticked by 6 pm</b><span class="small muted">A second alert, so you can move it by hand before the debit. (Part of the transfer-day alert.)</span></div></form>
-  ${fns.length ? h`<div class="card" style="padding:4px 16px"><div style="padding:12px 0 4px;font-weight:600">Paid from ${accIds.map((x) => C.accountName(d, x)).join(' / ')}, per pay fortnight</div>${fns.map((f) => h`<div class="between small" style="padding:10px 0;border-bottom:1px solid var(--line2)"><span>${C.fmtDate(f.p)} → ${C.fmtDate(f.e)}</span><span class="mono" style="font-weight:600">${C.money(f.v)}</span></div>`)}
-    <div class="xs muted" style="padding:10px 0 12px">Every bill paid from that account, transfer-linked or not.</div></div>
-    <div class="card pad stack" style="gap:6px"><div class="between"><b>Into savings each payday</b><span class="mono" style="font-weight:600">${C.money(annual / 26)}</span></div><div class="small" style="color:var(--ink2)">Covers a full year of bills from ${accIds.map((x) => C.accountName(d, x)).join(' / ')} (${C.money(annual)}).</div></div>` : ''}`;
-}
-
-// ----- accounts -----
-function scrAccounts() {
-  const d = doc();
-  const accs = (d.accounts || []).filter((a) => !a.del);
-  const count = (id) => C.liveBills(d).filter((b) => b.accountId === id && b.status !== 'stopped').length;
-  return h`${back('#/settings', 'Accounts')}<div class="small" style="color:var(--ink2)">Where bills are paid from. Add, rename or remove them any time.</div>
-  <div class="card list">${accs.filter((a) => a.active !== false).map((a) => h`<div class="item"><span class="grow stack" style="gap:2px"><span class="t" style="font-weight:600">${a.name}</span><span class="s">${{ bank: 'Bank account', credit: 'Credit card', savings: 'Savings' }[a.kind] || 'Account'} · ${count(a.id)} bills${a.note ? ' · ' + a.note : ''}</span></span><button class="btn small ghost" data-act="editacc" data-id="${a.id}">Edit</button></div>`)}
-  <button class="item" data-act="editacc" data-id="" style="justify-content:center;color:var(--brand);font-weight:600">+ Add an account</button></div>
-  ${accs.some((a) => a.active === false) ? h`<div class="eyebrow">Removed</div><div class="card dashed list">${accs.filter((a) => a.active === false).map((a) => h`<div class="item"><span class="grow stack" style="gap:2px"><span class="t muted">${a.name}</span><span class="s">Not offered for new bills · past payments kept</span></span><button class="btn small ghost" data-act="restoreacc" data-id="${a.id}">Restore</button></div>`)}</div>` : ''}
-  <button class="btn sec" data-act="movebills">Move bills to another account</button>
-  <div class="card warn pad small" style="line-height:1.5;color:#5A3500">Removing an account that still has bills asks where they should move, then adds a “tell the provider” to-do on each one.</div>`;
-}
-
-// ----- types -----
-function scrTypes() {
-  const d = doc();
-  const types = (d.types || []).filter((x) => !x.del).sort((a, b) => (a.order || 0) - (b.order || 0));
-  const count = (id) => C.liveBills(d).filter((b) => b.typeId === id).length;
-  const clash = (t) => types.find((o) => o.id !== t.id && o.color === t.color);
-  return h`${back('#/settings', 'Bill types & colours')}<div class="small" style="color:var(--ink2);line-height:1.45">Rename a type, change its colour or add a new one. Every screen and report follows the change.</div>
-  <div class="card list">${types.map((t) => h`<button class="item" data-act="edittype" data-id="${t.id}" style="min-height:56px"><span class="dot lg" style="background:${t.color}"></span><span class="grow stack" style="gap:2px"><span class="t" style="font-weight:600">${t.name}</span><span class="s">${count(t.id)} bills${clash(t) ? ' · same colour as ' + clash(t).name : ''}</span></span>${icon('next', 18)}</button>`)}
-  <button class="item" data-act="edittype" data-id="" style="justify-content:center;color:var(--brand);font-weight:600">+ Add a type</button></div>
-  <div class="card pad small" style="line-height:1.5;color:var(--ink2)">The first eight colours are picked to stay easy to tell apart side by side, including for colour-blind eyes. Charts also name every colour.</div>`;
-}
-
-// ----- properties -----
-function scrProperties() {
-  const d = doc(), t = today();
-  const fy = C.periodRange('fy', t, d);
-  const props = (d.properties || []).filter((p) => !p.del);
-  const card = (p) => {
-    const rent = C.rentIn(d, p, fy.from, fy.to);
-    const costs = C.propertyCosts(d, p.id, fy.from, fy.to, t);
-    const cr = (p.rents || []).filter((r) => !r.del).sort((a, b) => (a.from < b.from ? 1 : -1))[0];
-    const bills = C.liveBills(d).filter((b) => b.kind === 'investment' && b.propertyId === p.id);
-    const status = p.status === 'sold' ? h`<span class="pill grey">Sold ${C.fmtDate(p.soldAt, { year: true, dow: false })}</span>` : cr ? h`<span class="pill green">Rented</span>` : h`<span class="pill amber">${p.expectedWeekly ? 'Expected ' + C.money(p.expectedWeekly, 0) + '/wk' : 'Not rented'}</span>`;
-    return h`<div class="card pad stack" style="gap:12px"><div class="between" style="align-items:flex-start"><span class="stack" style="gap:2px"><h3>${p.name}</h3><span class="small muted">${p.manager ? 'Managed by ' + p.manager : ''}${cr ? ' · ' + C.money(cr.weekly) + ' a week from ' + C.fmtDate(cr.from, { year: true, dow: false }) : ''}</span></span>${status}</div>
-      <div class="list">${bills.map((b) => { const nd = C.nextDue(b, t); return h`<a class="item" href="#/bill/${b.id}" style="padding-left:0;min-height:40px"><span class="grow small">${b.name}${b.payMethod === 'rent' ? h` <span class="xs muted">· taken from rent</span>` : b.payMethod === 'manual' ? h` <span class="xs muted">· you pay</span>` : ''}${b.status === 'pending' ? h` <span class="xs muted">· not started</span>` : ''}${b.expectedChange ? h` <span class="xs" style="color:var(--amber-ink)">· ${b.expectedChange.toLowerCase()}</span>` : ''}</span><span class="mono small">${C.money(C.sumAmounts(C.schedule(d, fy.from, fy.to, t, (x) => x.id === b.id)))}</span></a>`; })}</div>
-      <div class="grid3" style="background:var(--inv-soft);border-radius:10px;padding:10px 12px"><div class="stack" style="gap:2px"><span class="xs" style="color:#4A5068">Rent ${fy.label.slice(-7)}</span><span class="mono small" style="font-weight:600">${C.money(rent)}</span></div><div class="stack" style="gap:2px"><span class="xs" style="color:#4A5068">Costs</span><span class="mono small" style="font-weight:600">${C.money(costs)}</span></div><div class="stack" style="gap:2px"><span class="xs" style="color:#4A5068">Net</span><span class="mono small" style="font-weight:600">${C.money(rent - costs)}</span></div></div>
-      <div class="grid2 no-print"><button class="btn small sec" data-act="rent" data-id="${p.id}">Rent changed / starts</button><button class="btn small ghost" data-act="editprop" data-id="${p.id}">Edit property</button></div></div>`;
-  };
-  const totalRent = C.round2(props.reduce((a, p) => a + C.rentIn(d, p, fy.from, fy.to), 0));
-  const totalCost = C.sumAmounts(C.schedule(d, fy.from, fy.to, t, (b) => b.kind === 'investment'));
-  const portfolio = C.liveBills(d).filter((b) => b.kind === 'investment' && !C.byId(d.properties, b.propertyId));
-  return h`${back('#/settings', 'Investment properties', 'Kept apart — not in household totals')}
-  <div class="hero inv"><div class="small" style="color:#CDD2EA">${fy.label} · ${C.fmtDate(fy.from, { dow: false, year: true })} – ${C.fmtDate(fy.to, { dow: false, year: true })}</div>
-    <div class="grid3"><div class="stack" style="gap:2px"><span class="xs" style="color:#CDD2EA">Rent in</span><span class="mono" style="font-weight:600">${C.money(totalRent)}</span></div><div class="stack" style="gap:2px"><span class="xs" style="color:#CDD2EA">Costs out</span><span class="mono" style="font-weight:600">${C.money(totalCost)}</span></div><div class="stack" style="gap:2px"><span class="xs" style="color:#CDD2EA">Net</span><span class="mono" style="font-weight:600">${C.money(totalRent - totalCost)}</span></div></div>
-    <div class="xs" style="color:#CDD2EA;line-height:1.45">Rent counts only weeks actually rented. A negative net means the properties cost more than they bring in. Your accountant still does the official figures.</div></div>
-  ${props.filter((p) => p.status !== 'sold').map(card)}
-  ${portfolio.length ? h`<div class="card pad stack"><h3>Across the portfolio</h3><div class="list">${portfolio.map((b) => h`<a class="item" href="#/bill/${b.id}" style="padding-left:0"><span class="grow small">${b.name}${b.notes ? h`<br><span class="xs muted">${b.notes}</span>` : ''}</span><span class="mono small">${C.money(C.sumAmounts(C.schedule(d, fy.from, fy.to, t, (x) => x.id === b.id)))}</span></a>`)}</div></div>` : ''}
-  <div class="grid2 no-print"><button class="btn" data-act="editprop" data-id="">+ Add a property</button><a class="btn ghost" href="#/edit/new">+ Add a property bill</a></div>
-  ${props.some((p) => p.status === 'sold') ? h`<div class="eyebrow">Past properties</div>${props.filter((p) => p.status === 'sold').map(card)}` : ''}
-  <div class="small muted" style="line-height:1.45">Sold properties stop their bills but keep their rent and costs in earlier years' reports.</div>`;
-}
-
-// ----- people you pay for -----
-function scrOthers() {
-  const d = doc();
-  const list = (d.others || []).filter((o) => !o.del);
-  return h`${back('#/settings', 'People you pay bills for')}<div class="small" style="color:var(--ink2)">Bills for these people are reminders only — never in your totals.</div>
-  <div class="card list">${list.map((o) => h`<div class="item"><span class="grow stack" style="gap:2px"><span class="t" style="font-weight:600">${o.name}</span><span class="s">${C.liveBills(d).filter((b) => b.forWhom === o.id).length} bills</span></span><button class="btn small ghost" data-act="editother" data-id="${o.id}">Rename</button></div>`)}
-  <button class="item" data-act="editother" data-id="" style="justify-content:center;color:var(--brand);font-weight:600">+ Add someone</button></div>`;
-}
-
-// ----- how each bill is paid -----
-function scrCheckPay() {
-  const d = doc();
-  const ids = d.settings.payCheckPending || [];
-  const list = ids.map((id) => C.byId(d.bills, id)).filter(Boolean);
-  const all = C.liveBills(d).filter((b) => b.status !== 'stopped' && !ids.includes(b.id));
-  const btns = (b) => h`<div class="row" style="gap:6px">${[['dd', 'Direct debit'], ['manual', 'I pay it'], ['rent', 'From rent']].map(([v, l]) => h`<button class="chip" style="flex:1" aria-pressed="${b.payMethod === v && !ids.includes(b.id) ? 'true' : 'false'}" data-act="setpay" data-bill="${b.id}" data-v="${v}">${l}</button>`)}</div>`;
-  return h`${back('#/settings', 'How each bill is paid')}
-  <div class="small" style="color:var(--ink2);line-height:1.45">Your spreadsheet doesn't say which bills come out by themselves. Pick one for each — <b>I pay it</b> bills stay on your To pay list and keep reminding you until ticked.</div>
-  ${list.length ? h`<div class="eyebrow">To confirm (${list.length})</div><div class="card list">${list.map((b) => h`<div class="stack" style="padding:12px 14px;gap:8px"><div class="between"><span class="stack" style="gap:2px"><b style="font-size:15px">${b.name}</b><span class="xs muted">${C.accountName(d, b.accountId)} · ${b.freq}</span></span></div>${btns(b)}</div>`)}</div>
-  <button class="btn sec" data-act="allDD">All the rest are direct debits</button>` : h`<div class="banner green">All confirmed. You can change any bill later in its edit screen.</div>`}
-  <div class="eyebrow">Already set</div><div class="card list">${all.map((b) => h`<div class="item"><span class="grow stack" style="gap:2px"><span class="t">${b.name}</span><span class="s">${{ dd: 'Direct debit', manual: 'I pay it', rent: 'From rent' }[b.payMethod]}</span></span><a class="btn small ghost" href="#/edit/${b.id}">Change</a></div>`)}</div>`;
-}
-
-// ----- alerts -----
-function scrAlerts() {
-  const d = doc(), r = d.settings.reminders || {}, n = d.settings.ntfy || {};
-  const url = n.topic ? (n.server || 'https://ntfy.sh').replace(/\/$/, '') + '/' + n.topic : '';
-  return h`${back('#/settings', 'Push alerts')}
-  <div class="card pad stack"><h3>1 · Your private alert channel</h3>
-    ${n.topic ? h`<div class="small" style="color:var(--ink2)">Topic name (treat it like a password):</div><div class="mono small" style="word-break:break-all;background:var(--bg);border-radius:8px;padding:10px">${n.topic}</div>
-      <div class="grid2"><button class="btn small ghost" data-act="copy" data-v="${n.topic}">Copy topic</button><button class="btn small" data-act="testalert">Send a test</button></div>` : h`<div class="small muted">Make a long random topic name. Only phones that know it get the alerts.</div><button class="btn" data-act="newtopic">Create my topic</button>`}
-  </div>
-  ${n.topic ? h`<div class="card pad stack small" style="line-height:1.55"><h3>2 · On each phone (Shaun & Lyndsey)</h3>
-    <div>1. Install <b>ntfy</b> from the Play Store (free, no account).</div><div>2. Open it, tap <b>+</b>, paste the topic above, and subscribe. Leave the server as ntfy.sh.</div>
-    <div>3. Samsung phones: Settings → Apps → ntfy → Battery → <b>Unrestricted</b>, or alerts can arrive late.</div><div>4. Tap <b>Send a test</b> above — it should pop up within a few seconds.</div></div>
-  <div class="card pad stack small" style="line-height:1.55"><h3>3 · The 7 am job on GitHub</h3><div>The alerts are sent by a scheduled job in your private <b>${S.dev.github ? S.dev.github.repo : 'bills-data'}</b> repo. It needs your family passphrase stored once as a GitHub secret called <b>BILLS_PASSPHRASE</b> (Settings → Secrets and variables → Actions → New repository secret). GitHub never shows it again.</div><div class="muted">GitHub's scheduler can run 5–30 minutes late, so "7:00" may arrive about 7:15.</div></div>` : ''}
-  <form data-form="alerts" class="card pad stack-lg"><h3>What you're told about</h3>
-    <label class="field">Morning summary covers the next<select name="digestDays">${[1, 2, 3, 5, 7].map((x) => opt(x, x + (x === 1 ? ' day' : ' days'), r.digestDays ?? 3))}</select><span class="hint">Every bill due in that window, each morning at about 7 am.</span></label>
-    <label class="field">Big one-off bills (quarterly, annual, 5-yearly) — extra warning<select name="lumpDays">${[0, 7, 14, 21, 30].map((x) => opt(x, x ? x + ' days before' : 'No extra warning', (r.lumpDays || [14])[0] ?? 0))}</select></label>
-    <label class="field">Annual renewal not reviewed — warn<select name="reviewDays">${[30, 45, 60].map((x) => opt(x, x + ' days before', r.reviewDays ?? 45))}</select><span class="hint">Review reminders go out on Monday mornings.</span></label>
-    <label class="switch"><span class="stack" style="gap:2px"><b style="font-size:15px">Sunday 6 pm: the week ahead</b><span class="small muted">Household bills for the next 7 days</span></span><input type="checkbox" name="weekly" ${r.weekly !== false ? 'checked' : ''}></label>
-    <label class="switch"><span class="stack" style="gap:2px"><b style="font-size:15px">Transfer days</b><span class="small muted">7 am on the day, and 6 pm if not ticked</span></span><input type="checkbox" name="transferCheck" ${r.transferCheck !== false ? 'checked' : ''}></label>
-    <label class="field">Alert server<input name="server" value="${n.server || 'https://ntfy.sh'}"><span class="hint">Change this later to move alerts to your QNAP.</span></label>
-    <div class="small muted">Alerts show only the bill name, amount and due date.</div>
-    <button class="btn sec" type="submit">Save alert settings</button></form>`;
-}
-
-// ----- sync -----
-function scrSync() {
-  const dev = S.dev;
-  if (!dev.github) return h`${back('#/settings', 'Sharing & backup')}
-  <div class="small" style="color:var(--ink2);line-height:1.5">Connect this phone to your private <b>bills-data</b> repo on GitHub. Everything is locked on the phone with your family passphrase before it's sent, so GitHub only ever stores scrambled data.</div>
-  ${!S.doc ? h`<div class="banner green small" style="line-height:1.5"><b>Getting your bills back?</b> Fill in the box below with your access key and the <b>same passphrase as before</b> — everything comes back from GitHub. No access key? Make a new one (bills-data only, Contents: Read and write).</div>` : ''}
-  <form data-form="connect" class="card pad stack-lg"><h3>${S.doc ? 'First phone (Shaun)' : 'Restore from GitHub'}</h3>
-    <div class="grid2"><label class="field">GitHub user<input name="owner" value="sskehan" autocapitalize="off"></label><label class="field">Private repo<input name="repo" value="bills-data" autocapitalize="off"></label></div>
-    <label class="field">Access key (fine-grained token)<input name="token" autocomplete="off" autocapitalize="off" placeholder="github_pat_…"><span class="hint">Only for the bills-data repo, with Contents: Read and write.</span></label>
-    <label class="field">Family passphrase<input name="pass" type="password" autocomplete="new-password"><span class="hint">At least 12 characters. Write it down — without it the backup can't be opened.</span></label>
-    <label class="field">Passphrase again<input name="pass2" type="password" autocomplete="new-password"></label>
-    <label class="field">Whose phone is this?<input name="name" value="${dev.name || 'Shaun'}"></label>
-    <button class="btn" type="submit">${S.doc ? 'Connect & back up now' : 'Get my bills back'}</button></form>
-  <form data-form="join" class="card pad stack-lg"><h3>Joining (Lyndsey, or a new phone)</h3>
-    <label class="field">Setup code<textarea name="code" placeholder="BILLS1.…" style="font-family:var(--mono);font-size:12px"></textarea></label>
-    <button class="btn small ghost" type="button" data-act="scan" style="align-self:flex-start">Scan the QR code instead</button>
-    <label class="field">Family passphrase<input name="pass" type="password" autocomplete="current-password"></label>
-    <label class="field">Whose phone is this?<input name="name" value="${dev.name || 'Lyndsey'}"></label>
-    <button class="btn" type="submit">Join</button></form>
-  ${dbxPanel()}
-  <div class="card pad stack"><h3>Without GitHub</h3><div class="small muted">You can still save a locked backup file and restore it on another phone.</div><div class="grid2"><button class="btn small ghost" data-act="dlbackup">Save backup file</button><button class="btn small ghost" data-act="restorefile">Restore from file</button></div></div>
-  ${clearWarn()}`;
-  return h`${back('#/settings', 'Sharing & backup')}
-  <div class="hero"><div class="row" style="gap:10px">${icon('shield', 22)}<b style="font-size:17px">${S.sync === 'error' ? 'Sync problem' : 'Everything is backed up'}</b></div>
-    <div class="sub">${S.sync === 'error' ? S.syncErr : 'Saved after every change to ' + dev.github.owner + '/' + dev.github.repo + ', locked with your family passphrase.'} ${dev.lastSync ? 'Last sync ' + new Date(dev.lastSync).toLocaleString('en-AU', { dateStyle: 'medium', timeStyle: 'short' }) + '.' : ''}</div>
-    <button class="btn" style="background:#fff;color:var(--brand-dark);align-self:flex-start" data-act="syncnow">Sync now</button></div>
-  <div class="card pad stack"><h3>Add a phone</h3><div class="small muted">On the other phone open the Bills link, go to Settings → Sharing & backup → Join, scan this code (or paste it), then type the family passphrase. The code is locked with the passphrase, so it's useless on its own.</div>
-    <button class="btn sec" data-act="setupcode">Show setup code</button><div id="setupcode"></div></div>
-  <div class="card pad stack"><div class="between"><h3>Backup history</h3><button class="btn small ghost" data-act="history">Load</button></div><div class="small muted">Every saved version is kept on GitHub. Roll the whole app back if something was deleted by mistake.</div><div id="history"></div></div>
-  ${dbxPanel()}
-  <div class="card pad stack"><h3>Extra copy</h3><div class="small muted">Save a locked file to Google Drive or your NAS now and then — it opens with the same passphrase.</div><div class="grid2"><button class="btn small ghost" data-act="dlbackup">Save backup file</button><button class="btn small ghost" data-act="restorefile">Restore from file</button></div></div>
-  <div class="card pad stack"><h3>This phone</h3><div class="small muted">${dev.name || 'Not named'} · connected to ${dev.github.owner}/${dev.github.repo}</div><button class="btn small danger" data-act="disconnect" style="align-self:flex-start">Disconnect this phone</button></div>
-  ${clearWarn()}`;
-}
-
-function dbxPanel() {
-  if (!DB.isOn(S.dev)) return h`<div class="card pad stack" style="gap:10px"><h3>Dropbox</h3>
-    <div class="small muted" style="line-height:1.5">Keep a locked copy of your bills in your own Dropbox as well. It's saved a few seconds after every change, with a full snapshot each day kept for ${DB.KEEP_DAYS} days. If Chrome is cleared or the phone is replaced, sign in to Dropbox and everything comes back.</div>
-    <button class="btn" data-act="dbxconnect" style="align-self:flex-start">Connect Dropbox</button>
-    <div class="xs muted">The app can only see its own folder (Dropbox › Apps › Bills). It's locked with the family passphrase, like GitHub.</div></div>`;
-  const dx = S.dev.dbx;
-  return h`<div class="card pad stack" style="gap:10px"><div class="between"><h3>Dropbox</h3><span class="pill ${S.dbx === 'error' ? 'red' : 'green'}">${S.dbx === 'error' ? 'Problem' : S.dbx === 'syncing' ? 'Saving…' : 'On'}</span></div>
-    <div class="small" style="line-height:1.6">${dx.email ? h`<div><span class="muted">Account</span> ${dx.email}</div>` : ''}<div><span class="muted">Status</span> ${dbxLine()}</div><div><span class="muted">Last snapshot</span> ${dx.lastSnapDay ? C.fmtDate(dx.lastSnapDay, { year: true }) : 'later today'}</div></div>
-    <div class="grid2"><button class="btn small" data-act="dbxsync">Save to Dropbox now</button><button class="btn small sec" data-act="dbxsnap">Snapshot now</button></div>
-    <div class="grid2"><button class="btn small ghost" data-act="dbxlist">Restore a snapshot…</button><button class="btn small ghost" data-act="dbxoff">Disconnect</button></div>
-    <div class="xs muted" style="line-height:1.5">In Dropbox › Apps › Bills: <b>live</b> is the current copy and <b>snapshots</b> holds one a day (plus one before every restore) for ${DB.KEEP_DAYS} days. Each file opens with the family passphrase, and also works with <b>Restore from file</b>.</div></div>`;
-}
-function clearWarn() {
-  return h`<div class="banner amber small" style="line-height:1.5"><b>Clearing Chrome?</b> In <i>Delete browsing data</i>, untick <b>Cookies and site data</b>. That option deletes the bills on this phone. They'd still be in ${DB.isOn(S.dev) ? 'Dropbox' : ''}${DB.isOn(S.dev) && S.dev.github ? ' and ' : ''}${S.dev.github ? 'GitHub' : ''}${!DB.isOn(S.dev) && !S.dev.github ? 'a backup only if you’ve connected one' : ''}, but you'd need the passphrase to get them back.</div>`;
-}
-
-// ----- excel -----
-function scrExcel() {
-  return h`${back('#/settings', 'Excel workbook')}
-  <div class="card pad stack small" style="line-height:1.55"><h3>Refresh button in tab 11</h3><div>A macro in your workbook fetches the latest locked backup from GitHub, unlocks it on your PC, and writes the bills into the <b>Bills Register</b> (rows 102 on). Your formulas, month planner and other tabs then update as normal. The app is the master copy; Excel shows the latest whenever you click Refresh (or when the workbook opens).</div><div class="muted">Setup steps are in the guide that came with the app.</div></div>
-  <div class="card pad stack"><h3>Quick CSV</h3><div class="small muted">Or download the register as a CSV and paste it in yourself.</div><button class="btn sec" data-act="csv">Download register CSV</button></div>`;
-}
-
-// ----- reports -----
-function reportRange() {
-  const d = doc(), t = today();
-  const k = S.ui.rKind;
-  if (k === 'custom') {
-    const from = S.ui.rFrom || C.addDays(t, -30), to = S.ui.rTo || t;
-    return { from, to: to < from ? from : to, label: C.fmtDate(from, { year: true }) + ' – ' + C.fmtDate(to, { year: true }) };
-  }
-  return C.periodRange(k, S.ui.rAnchor || t, d);
-}
-function scrReports() {
-  const d = doc(), t = today();
-  const R = reportRange();
-  const incl = (b) => C.inTotals(b) || (S.ui.rInv && b.kind === 'investment');
-  const items = C.schedule(d, R.from, R.to, t, (b) => b.status !== 'pending' && incl(b));
-  const hhItems = items.filter((i) => C.inTotals(i.bill));
-  const total = C.sumAmounts(items);
-  const span = C.daysBetween(R.from, R.to) + 1;
-  const annual = C.liveBills(d).filter((b) => C.inTotals(b) && b.status === 'active').reduce((a, b) => a + C.annualAmount(b, t, d), 0);
-  const avgFor = annual / 365.25 * span;
-  const byBill = new Map();
-  for (const i of hhItems) { const c = byBill.get(i.bill.id) || { bill: i.bill, total: 0 }; c.total += i.amount || 0; byBill.set(i.bill.id, c); }
-  const top = [...byBill.values()].sort((a, b) => b.total - a.total).slice(0, 8);
-  const types = (d.types || []).filter((x) => !x.del).sort((a, b) => (a.order || 0) - (b.order || 0));
-  const share = C.totalsByType(d, hhItems).sort((a, b) => b.total - a.total);
-  if (S.ui.rInv) { const inv = C.sumAmounts(items.filter((i) => !C.inTotals(i.bill))); if (inv) share.push({ name: 'Investment properties (included)', color: '#6250d6', total: inv }); share.sort((a, b) => b.total - a.total); }
-  const grand = share.reduce((a, x) => a + x.total, 0) || 1, maxS = share.length ? share[0].total : 1;
-  // months for the chart
-  const months = [];
-  if (span > 62) for (let m = R.from.slice(0, 8) + '01'; m <= R.to; m = C.addMonths(m, 1)) {
-    const e = C.addDays(C.addMonths(m, 1), -1);
-    const its = hhItems.filter((i) => i.due >= m && i.due <= e);
-    months.push({ m, its, total: C.sumAmounts(its), byType: types.map((ty) => ({ ty, v: C.sumAmounts(its.filter((i) => i.bill.typeId === ty.id)) })) });
-  }
-  const maxM = Math.max(1, ...months.map((x) => x.total));
-  const scaleTop = Math.ceil(maxM / 2000) * 2000 || 2000;
-  const sel = months.find((x) => x.m === S.ui.rSel) || months.find((x) => t.startsWith(x.m.slice(0, 7))) || months[0];
-  const changes = C.priceChanges(d, R.from, R.to);
-  const props = (d.properties || []).filter((p) => !p.del);
-  const invRows = props.map((p) => ({ p, rent: C.rentIn(d, p, R.from, R.to), cost: C.propertyCosts(d, p.id, R.from, R.to, t) }));
-  const portfolioCost = C.propertyCosts(d, null, R.from, R.to, t);
-  const invRent = C.round2(invRows.reduce((a, x) => a + x.rent, 0)), invCost = C.round2(invRows.reduce((a, x) => a + x.cost, 0) + portfolioCost);
-  const big = months.length ? months.slice().sort((a, b) => b.total - a.total)[0] : null;
-  const quiet = months.length ? months.slice().sort((a, b) => a.total - b.total)[0] : null;
-  const kinds = [['pay', 'Pay fortnight'], ['month', 'Month'], ['quarter', 'Quarter'], ['fy', 'Financial year'], ['cal', 'Calendar year'], ['custom', 'Custom dates']];
-  return h`<div class="print-only"><h1>Bills report — ${R.label}</h1><div class="small muted">Skehan household · printed ${C.fmtDate(t, { year: true })} · ${S.ui.rInv ? 'includes investment properties' : 'household bills only'}</div></div>
-  <div class="no-print">${back('#/', 'Reports')}</div>
-  <div class="chips no-print">${kinds.map(([k, l]) => h`<button class="chip" data-act="rkind" data-v="${k}" aria-pressed="${S.ui.rKind === k}">${l}</button>`)}</div>
-  ${S.ui.rKind === 'custom' ? h`<div class="grid2 no-print"><label class="field">From<input type="date" value="${R.from}" data-input="rFrom"></label><label class="field">To<input type="date" value="${R.to}" data-input="rTo"></label></div>`
-    : h`<div class="between no-print"><button class="btn small ghost" data-act="rshift" data-v="-1">${icon('back', 16)} Previous</button><b class="small" style="text-align:center">${R.label}</b><button class="btn small ghost" data-act="rshift" data-v="1">Next ${icon('next', 16)}</button></div>`}
-  <label class="card switch no-print" style="padding:10px 12px"><span class="small" style="font-weight:500">Include investment properties</span><input type="checkbox" data-rinv="1" ${S.ui.rInv ? 'checked' : ''}></label>
-  <div class="grid2">
-    <div class="tile"><span class="k">${S.ui.rInv ? 'All bills' : 'Household bills'}</span><span class="v">${C.money(total)}</span><span class="xs muted">${items.length} payments · ${C.fmtDate(R.from, { dow: false, year: true })} – ${C.fmtDate(R.to, { dow: false, year: true })}</span></div>
-    <div class="tile"><span class="k">${span > 62 ? 'Average month' : 'Compared with average'}</span><span class="v">${span > 62 ? C.money(C.sumAmounts(hhItems) / (span / 30.4375)) : (avgFor ? ((C.sumAmounts(hhItems) / avgFor - 1) * 100 >= 0 ? '+' : '') + Math.round((C.sumAmounts(hhItems) / avgFor - 1) * 100) + '%' : '—')}</span><span class="xs muted">${span > 62 ? C.money(C.sumAmounts(hhItems) / (span / 14)) + ' per fortnight' : 'vs a typical ' + span + ' days (' + C.money(avgFor) + ')'}</span></div>
-    ${big ? h`<div class="tile"><span class="k">Most expensive month</span><span class="v" style="font-family:var(--sans)">${C.monthName(Number(big.m.slice(5, 7)) - 1)}</span><span class="xs muted">${C.money(big.total)} household</span></div><div class="tile"><span class="k">Quietest month</span><span class="v" style="font-family:var(--sans)">${C.monthName(Number(quiet.m.slice(5, 7)) - 1)}</span><span class="xs muted">${C.money(quiet.total)} household</span></div>`
-      : h`<div class="tile"><span class="k">Biggest single bill</span><span class="v">${top[0] ? C.money(top[0].total) : '—'}</span><span class="xs muted">${top[0] ? top[0].bill.name : ''}</span></div><div class="tile"><span class="k">Paid so far</span><span class="v">${C.money(C.sumAmounts(hhItems.filter((i) => i.state === 'paid')))}</span><span class="xs muted">of ${C.money(C.sumAmounts(hhItems))} household</span></div>`}
-  </div>
-  ${months.length > 1 ? h`<div class="card pad stack" style="gap:12px"><div class="between"><h3>Household bills by month</h3><button class="btn small ghost no-print" data-act="rtable">${S.ui.rTable ? 'Show chart' : 'Show table'}</button></div>
-    <div class="row wrap" style="gap:6px 14px">${types.filter((ty) => months.some((m) => m.byType.find((x) => x.ty.id === ty.id).v)).map((ty) => h`<span class="row xs" style="gap:6px;color:var(--ink2)"><span class="dot" style="background:${ty.color}"></span>${ty.name}</span>`)}</div>
-    ${S.ui.rTable ? h`<div style="overflow-x:auto"><table class="t"><thead><tr><th>Month</th><th class="r">Total</th><th>Biggest type</th></tr></thead><tbody>${months.map((m) => { const b = m.byType.slice().sort((a, c) => c.v - a.v)[0]; return h`<tr><td>${C.monthName(Number(m.m.slice(5, 7)) - 1, false)} ${m.m.slice(0, 4)}</td><td class="r">${C.money(m.total)}</td><td>${b && b.v ? b.ty.name : '—'}</td></tr>`; })}</tbody></table></div>`
-    : h`<div class="stackchart"><span class="grid" style="top:${196 - 170 * (scaleTop / 2) / scaleTop}px"></span><span class="gl" style="top:${196 - 170 * 0.5 - 14}px">${C.money(scaleTop / 2, 0)}</span><span class="grid" style="top:${196 - 170}px"></span><span class="gl" style="top:${196 - 170 - 14}px">${C.money(scaleTop, 0)}</span>
-      ${months.map((m) => h`<button class="${sel && sel.m === m.m ? 'sel' : ''}" data-act="rsel" data-v="${m.m}" aria-label="${C.monthName(Number(m.m.slice(5, 7)) - 1)} ${C.money(m.total)}">${m.byType.filter((x) => x.v > 0).map((x) => h`<span class="sbar" style="height:${Math.max(1, Math.round(x.v / scaleTop * 170))}px;background:${x.ty.color}"></span>`)}</button>`)}</div>
-      <div class="xlabels">${months.map((m) => h`<span>${C.monthName(Number(m.m.slice(5, 7)) - 1, false).slice(0, 1)}</span>`)}</div>
-      ${sel ? h`<div class="stack" style="background:var(--bg);border-radius:12px;padding:12px;gap:6px"><div class="between small" style="font-weight:600"><span>${C.monthName(Number(sel.m.slice(5, 7)) - 1)} ${sel.m.slice(0, 4)}</span><span class="mono">${C.money(sel.total)}</span></div>${sel.byType.filter((x) => x.v).map((x) => h`<div class="between xs" style="color:var(--ink2)"><span class="row" style="gap:6px"><span class="dot" style="background:${x.ty.color}"></span>${x.ty.name}</span><span class="mono">${C.money(x.v)}</span></div>`)}</div>` : ''}`}
-  </div>` : ''}
-  <div class="card pad stack" style="gap:12px"><h3>Where the money goes</h3>
-    ${share.length ? share.map((s) => h`<div class="stack" style="gap:4px"><div class="between small"><span class="row" style="gap:6px"><span class="dot" style="background:${s.color}"></span>${s.name}</span><span><span class="mono" style="font-weight:600">${C.money(s.total, 0)}</span> <span class="muted">· ${Math.round(s.total / grand * 100)}%</span></span></div><div class="bar"><span style="width:${(s.total / maxS * 100).toFixed(1)}%;background:${s.color}"></span></div></div>`) : h`<div class="small muted">Nothing in this period.</div>`}</div>
-  ${top.length ? h`<div class="card pad stack" style="gap:6px"><h3>Biggest household bills</h3><table class="t"><tbody>${top.map((x, k) => h`<tr><td style="width:18px" class="muted">${k + 1}</td><td><span class="row" style="gap:8px"><span class="dot" style="background:${C.typeColor(d, x.bill)}"></span>${x.bill.name}</span></td><td class="r">${C.money(x.total)}</td></tr>`)}</tbody></table></div>` : ''}
-  <div class="card pad stack" style="gap:8px"><h3>Price changes</h3>${changes.length ? h`<table class="t"><thead><tr><th>Bill</th><th>From</th><th class="r">New</th><th class="r">Change</th></tr></thead><tbody>${changes.map((c) => h`<tr><td>${c.bill.name}</td><td>${C.fmtDate(c.from, { dow: false, year: true })}</td><td class="r">${C.money(c.amount)}</td><td class="r" style="color:${c.change > 0 ? 'var(--red)' : '#1B6B3A'}">${c.change > 0 ? '+' : ''}${c.pct}%</td></tr>`)}</tbody></table>` : h`<div class="small muted">No bills changed price in this period. Each time you use “Change amount” it's listed here.</div>`}</div>
-  <a class="hero inv" href="#/properties" style="color:#fff"><div class="between"><h3>Investment properties</h3>${icon('next', 18)}</div><div class="xs" style="color:#CDD2EA">${S.ui.rInv ? 'Included in the figures above' : 'Kept apart — not in the figures above'}</div>
-    <table class="t" style="color:#fff"><thead><tr><th style="border-color:#55608a"></th><th class="r" style="border-color:#55608a">Rent</th><th class="r" style="border-color:#55608a">Costs</th><th class="r" style="border-color:#55608a">Net</th></tr></thead><tbody>${invRows.map((x) => h`<tr><td style="border-color:#3d4775">${x.p.name}</td><td class="r" style="border-color:#3d4775">${C.money(x.rent)}</td><td class="r" style="border-color:#3d4775">${C.money(x.cost)}</td><td class="r" style="border-color:#3d4775">${C.money(x.rent - x.cost)}</td></tr>`)}${portfolioCost ? h`<tr><td style="border-color:#3d4775">Across the portfolio</td><td class="r" style="border-color:#3d4775">—</td><td class="r" style="border-color:#3d4775">${C.money(portfolioCost)}</td><td class="r" style="border-color:#3d4775">${C.money(-portfolioCost)}</td></tr>` : ''}<tr><td><b>Total</b></td><td class="r"><b>${C.money(invRent)}</b></td><td class="r"><b>${C.money(invCost)}</b></td><td class="r"><b>${C.money(invRent - invCost)}</b></td></tr></tbody></table></a>
-  <div class="small muted" style="line-height:1.45">Future dates are projected from your bills; past ones use the amounts that applied then. Paid ticks and direct debits turn projections into actuals.</div>
-  <button class="btn no-print" data-act="print">${icon('download', 18)} Export PDF</button>`;
-}
-
-// ----- setup -----
-function scrSetup() {
-  return h`<div class="stack" style="gap:6px;padding-top:12px"><h1>Bills</h1><div class="muted">Let's get your bills onto this phone.</div></div>
-  <div class="card pad stack" style="gap:10px;border:1.5px solid var(--brand)"><h3>Cleared Chrome, or a new phone?</h3><span class="small muted">Get your bills back from a copy you've saved before. You'll need the family passphrase.</span>
-    <button class="btn" data-act="dbxconnect">Get my bills from Dropbox</button>
-    <div class="grid2"><a class="btn sec" href="#/sync">From GitHub</a><button class="btn sec" data-act="restorefile">From a backup file</button></div></div>
-  <div class="eyebrow">Or start fresh</div>
-  <button class="card pad stack" data-act="importfile" style="text-align:left;gap:6px;color:inherit"><h3>Import from your spreadsheet</h3><span class="small muted">Open the <b>bills-import.json</b> file that came with the app (made from tab 11).</span></button>
-  <a class="card pad stack" href="#/sync" style="gap:6px;color:inherit"><h3>Join the family copy</h3><span class="small muted">For Lyndsey's phone — use the setup code from Shaun's phone and the passphrase.</span></a>
-  <button class="card pad stack" data-act="startempty" style="text-align:left;gap:6px;color:inherit"><h3>Start empty</h3><span class="small muted">Add bills by hand.</span></button>`;
-}
-
-// ---------- router ----------
-const TABS = [['#/', 'Upcoming', 'clock'], ['#/calendar', 'Calendar', 'cal'], ['#/bills', 'Bills', 'list'], ['#/reviews', 'Reviews', 'shield'], ['#/settings', 'Settings', 'sliders']];
-function screen() {
-  const [r, ...p] = S.route.split('/');
-  switch (r) {
-    case '': return scrUpcoming();
-    case 'attention': return scrAttention();
-    case 'calendar': return scrCalendar();
-    case 'bills': return scrBills();
-    case 'reviews': return scrReviews();
-    case 'settings': return scrSettings();
-    case 'activity': return scrActivity();
-    case 'bill': return scrBill(p[0]);
-    case 'edit': return scrEdit(p[0]);
-    case 'pay': return scrPay();
-    case 'transfers': return scrTransfers();
-    case 'accounts': return scrAccounts();
-    case 'types': return scrTypes();
-    case 'properties': return scrProperties();
-    case 'others': return scrOthers();
-    case 'checkpay': return scrCheckPay();
-    case 'alerts': return scrAlerts();
-    case 'sync': return scrSync();
-    case 'excel': return scrExcel();
-    case 'reports': return scrReports();
-    case 'setup': return scrSetup();
-    default: return scrUpcoming();
-  }
-}
-let lastRoute = null;
-function render() {
-  const app = $app();
-  const keepScroll = lastRoute === S.route;
-  const y = window.scrollY;
-  const active = document.activeElement && document.activeElement.dataset && document.activeElement.dataset.input;
-  const tab = '#/' + (S.route.split('/')[0] || '');
-  const noTabs = !S.doc || S.route === 'setup';
-  try {
-    app.innerHTML = screen().toString();
-  } catch (e) {
-    console.error(e);
-    app.innerHTML = h`<div class="banner red">Something went wrong showing this screen: ${e.message}</div><a class="btn" href="#/">Back to Upcoming</a>`.toString();
-  }
-  document.getElementById('tabs').innerHTML = noTabs ? '' : TABS.map(([href, label, ic]) => h`<a href="${href}" ${tab === href || (href === '#/bills' && ['bill', 'edit'].includes(S.route.split('/')[0])) || (href === '#/settings' && ['pay', 'transfers', 'accounts', 'types', 'properties', 'others', 'checkpay', 'alerts', 'sync', 'excel', 'activity'].includes(S.route.split('/')[0])) ? raw('aria-current="page"') : ''}>${icon(ic)}${label}</a>`).join('');
-  document.getElementById('tabs').hidden = noTabs;
-  app.querySelectorAll('form[data-form="bill"]').forEach((f) => { const dr = getDraft(f.dataset.id); if (dr) applyDraft(f, dr); updateShows(f); });
-  if (keepScroll) window.scrollTo(0, y); else window.scrollTo(0, 0);
-  if (active) { const el = app.querySelector(`[data-input="${active}"]`); if (el) { el.focus(); const v = el.value; if (el.setSelectionRange && el.type !== 'date') try { el.setSelectionRange(v.length, v.length); } catch {} } }
-  lastRoute = S.route;
-}
-function onRoute() {
-  S.route = (location.hash || '#/').slice(2);
-  if (!S.doc && !['setup', 'sync'].includes(S.route.split('/')[0])) { location.hash = '#/setup'; return; }
-  render();
-}
-
-// ---------- actions ----------
-const A = {
-  range: (el) => { S.ui.range = Number(el.dataset.v); render(); },
-  toggle: (el) => { const k = el.dataset.k; S.ui.open[k] = !S.ui.open[k]; render(); },
-  calsel: (el) => { S.ui.calSel = el.dataset.d; render(); },
-  calmonth: (el) => { const m = S.ui.calMonth || today().slice(0, 8) + '01'; S.ui.calMonth = C.addMonths(m, Number(el.dataset.v)); S.ui.calSel = null; render(); },
-  pay: async (el) => {
-    const d = doc(), b = C.byId(d.bills, el.dataset.bill), due = el.dataset.due;
-    const ex = C.paymentFor(d, b.id, due);
-    if (ex && ex.status !== 'missed') { await commit('Un-ticked ' + b.name + ' (' + C.fmtDate(due, { dow: false }) + ')', (dd) => { touch(ex); ex.del = true; }); return; }
-    const a = C.amountOn(b, due, d);
-    await commit('Paid ' + b.name + ' ' + C.money(a) + ' (due ' + C.fmtDate(due, { dow: false }) + ')', (dd) => { if (ex) { touch(ex); ex.del = true; } dd.payments.push(touch({ id: C.uid('pm'), billId: b.id, due, date: today(), amount: a, status: 'paid' })); });
-    toast('Marked paid today', 6000, h`<button class="btn small sec" data-act="payedit" data-bill="${b.id}" data-due="${due}" style="margin-left:12px">Change</button>`.toString());
-  },
-  payedit: (el) => {
-    const d = doc(), b = C.byId(d.bills, el.dataset.bill), due = el.dataset.due, t = today();
-    const p = C.paymentFor(d, b.id, due), s = C.payState(d, b, due, t);
-    const rec = p && p.status !== 'missed' ? p : null;
-    const tEl = document.querySelector('.toast'); if (tEl) tEl.hidden = true;
-    const auto = b.payMethod !== 'manual';
-    const defDate = rec && C.isISO(rec.date) ? rec.date : C.settled(s) || auto ? due : t;
-    openSheet(h`<h2>Payment — ${b.name}</h2><div class="small muted">Due ${C.fmtDate(due, { year: true })} · ${auto ? 'direct debit' : 'you pay it'}</div>
-      <form data-form="payedit" data-bill="${b.id}" data-due="${due}" class="stack-lg">
-        <label class="field">Paid on<input type="date" name="date" value="${defDate}" required><span class="hint">A date still to come means it's scheduled (e.g. a BPAY set up for Friday) — reminders stop.</span></label>
-        <label class="field">Amount paid ($)<input class="money" type="number" step="0.01" inputmode="decimal" name="amount" value="${rec && typeof rec.amount === 'number' ? rec.amount : C.amountOn(b, due, d) ?? ''}"><span class="hint">Change it for a part payment or a late fee. Reports use what was paid.</span></label>
-        <label class="field">Note (optional)<input name="note" value="${(rec && rec.note) || ''}" placeholder="e.g. BPAY receipt 12345"></label>
-        <button class="btn" type="submit">Save</button>
-        ${rec ? h`<button class="btn ghost danger" type="button" data-act="payremove" data-bill="${b.id}" data-due="${due}">${auto ? 'Reset to automatic' : 'Remove payment (not paid)'}</button>` : ''}
-      </form>`.toString());
-  },
-  payremove: async (el) => {
-    const d = doc(), b = C.byId(d.bills, el.dataset.bill), due = el.dataset.due, ex = C.paymentFor(d, b.id, due);
-    closeSheet(); if (!ex) return;
-    await commit('Removed the ' + b.name + ' payment for ' + C.fmtDate(due, { dow: false }), () => { touch(ex); ex.del = true; });
-    toast(b.payMethod === 'manual' ? 'Marked not paid' : 'Back to automatic');
-  },
-  missed: async (el) => {
-    const d = doc(), b = C.byId(d.bills, el.dataset.bill), due = el.dataset.due;
-    const ex = C.paymentFor(d, b.id, due);
-    if (ex && ex.status === 'missed') { await commit('Undid "didn’t come out" for ' + b.name, () => { touch(ex); ex.del = true; }); return; }
-    await commit(b.name + ' ' + C.fmtDate(due, { dow: false }) + ' didn’t come out', (dd) => dd.payments.push(touch({ id: C.uid('pm'), billId: b.id, due, date: today(), status: 'missed' })));
-  },
-  trtick: async (el) => {
-    const date = el.dataset.date, cur = (doc().transferChecks || {})[date];
-    await commit((cur && !cur.undone ? 'Un-ticked' : 'Ticked') + ' the savings transfer for ' + C.fmtDate(date, { dow: false }), (dd) => {
-      dd.transferChecks = dd.transferChecks || {};
-      if (cur && !cur.undone) dd.transferChecks[date] = { undone: true, u: Date.now(), by: who() };
-      else dd.transferChecks[date] = { by: who(), at: Date.now(), u: Date.now() };
-    });
-  },
-  todo: async (el) => { const b = C.byId(doc().bills, el.dataset.bill); const td = b.todos.find((x) => x.id === el.dataset.id); await commit((td.done ? 'Re-opened: ' : 'Done: ') + td.text, () => { td.done = !td.done; touch(b); }); },
-  reveal: (el) => { el.textContent = el.dataset.v; },
-  copy: (el) => copyText(el.dataset.v),
-  review: (el) => {
-    const b = C.byId(doc().bills, el.dataset.bill);
-    const s = openSheet(h`<h2>Reviewed — ${b.name}</h2><form data-form="review" data-id="${b.id}" class="stack-lg"><label class="field">Date reviewed<input type="date" name="date" value="${today()}" max="${today()}"></label>
-      <div class="stack" style="gap:8px"><span class="field" style="gap:0">What happened?</span><div class="chips">${['Kept the same', 'Got a cheaper quote', 'Switched provider', 'Negotiated a discount'].map((o, i) => h`<label class="chip" style="position:relative;display:inline-flex;align-items:center"><input type="radio" name="outcome" value="${o}" ${i === 0 ? 'checked' : ''} style="position:absolute;opacity:0;inset:0">${o}</label>`)}</div></div>
-      <label class="field">Note (optional)<input name="note" placeholder="e.g. quote from another insurer"></label><button class="btn" type="submit">Save review</button></form>`.toString());
-    syncChipPressed(s);
-  },
-  newamount: (el) => {
-    const d = doc(), b = C.byId(d.bills, el.dataset.bill), nd = C.nextDue(b, today()) || today();
-    const cur = C.baseAmountOn(b, nd);
-    openSheet(h`<h2>Change amount — ${b.name}</h2><form data-form="newamount" data-id="${b.id}" class="stack-lg"><div class="grid2"><label class="field">New amount<input class="money" type="number" step="0.01" min="0" inputmode="decimal" name="amount" placeholder="${cur ?? ''}" required data-cur="${cur ?? ''}"></label><label class="field">Starts from<input type="date" name="from" value="${nd}"></label></div>
-      <div class="small muted" id="amtprev">Currently ${C.money(cur)}. Earlier payments keep the old amount.</div><label class="field">Note (optional)<input name="note" placeholder="e.g. 2027 renewal notice"></label><button class="btn" type="submit">Save new amount</button></form>`.toString());
-  },
-  stop: async (el) => {
-    const b = C.byId(doc().bills, el.dataset.bill);
-    if (!(await confirmSheet('Stop ' + b.name + '?', 'Use this when you cancel or switch. Reminders stop from today; past payments stay in reports. You can restart it later.', 'Stop bill', true))) return;
-    await commit('Stopped ' + b.name, () => { b.status = 'stopped'; b.stoppedAt = today(); touch(b); });
-  },
-  restart: async (el) => { const b = C.byId(doc().bills, el.dataset.bill); await commit('Restarted ' + b.name, () => { b.status = 'active'; delete b.stoppedAt; touch(b); }); },
-  delete: async (el) => {
-    const b = C.byId(doc().bills, el.dataset.bill);
-    if (!(await confirmSheet('Delete ' + b.name + ' permanently?', 'This removes it and its payment history from every report. To keep the history, use <b>Stop this bill</b> instead. You can still get it back from Backup history.', 'Delete', true))) return;
-    await commit('Deleted ' + b.name, () => { touch(b); b.del = true; });
-    location.hash = '#/bills';
-  },
-  setpay: async (el) => { const b = C.byId(doc().bills, el.dataset.bill), v = el.dataset.v; await commit(b.name + ': ' + { dd: 'direct debit', manual: 'I pay it', rent: 'from rent' }[v], (dd) => { b.payMethod = v; touch(b); dd.settings.payCheckPending = (dd.settings.payCheckPending || []).filter((x) => x !== b.id); touch(dd.settings); }); },
-  allDD: async () => { if (!(await confirmSheet('All the rest are direct debits?', 'Every bill still on the list will be set to Direct debit. You can change any of them later.', 'Yes'))) return; await commit('Confirmed the rest are direct debits', (dd) => { dd.settings.payCheckPending = []; touch(dd.settings); }); },
-  payoverride: () => {
-    const d = doc(), pds = C.paydays(d.settings, C.addDays(today(), -14), C.addDays(today(), 120));
-    openSheet(h`<h2>One-off pay change</h2><form data-form="override" class="stack-lg"><div class="grid2"><label class="field">Whose pay<select name="personId">${(d.people || []).filter((p) => !p.del).map((p) => opt(p.id, p.name))}</select></label><label class="field">Payday<select name="date">${pds.map((p) => opt(p, C.fmtDate(p, { year: true })))}</select></label></div>
-      <div class="grid2"><label class="field">Take-home that payday<input class="money" type="number" step="0.01" name="takeHome"></label><label class="field">Gross (optional)<input class="money" type="number" step="0.01" name="gross"></label></div><label class="field">Why (optional)<input name="note" placeholder="Overtime, leave loading…"></label><button class="btn" type="submit">Save</button></form>`.toString());
-  },
-  deloverride: async (el) => { const o = (doc().payOverrides || []).find((x) => x.id === el.dataset.id); await commit('Removed a one-off pay change', () => { touch(o); o.del = true; }); },
-  editacc: (el) => {
-    const d = doc(), a = C.byId(d.accounts, el.dataset.id) || { id: '', name: '', kind: 'bank', note: '' };
-    const n = C.liveBills(d).filter((b) => b.accountId === a.id && b.status !== 'stopped').length;
-    const others = (d.accounts || []).filter((x) => !x.del && x.active !== false && x.id !== a.id);
-    openSheet(h`<h2>${a.id ? 'Edit account' : 'Add an account'}</h2><form data-form="account" data-id="${a.id}" class="stack-lg"><label class="field">Name<input name="name" value="${a.name}" required></label><label class="field">Kind<select name="kind">${opt('bank', 'Bank account', a.kind)}${opt('credit', 'Credit card', a.kind)}${opt('savings', 'Savings', a.kind)}</select></label><label class="field">Note (optional)<input name="note" value="${a.note || ''}"></label><button class="btn" type="submit">Save</button></form>
-      ${a.id ? h`<form data-form="removeacc" data-id="${a.id}" class="card pad stack"><h3>Remove ${a.name}</h3>${n ? h`<div class="small muted">${n} bills are paid from it. Move them to:</div><label class="field"><select name="to">${others.map((o) => opt(o.id, o.name))}</select></label>` : h`<div class="small muted">No bills use it. Past payments are kept.</div>`}<button class="btn danger" type="submit">${n ? 'Move ' + n + ' bills and remove' : 'Remove account'}</button></form>` : ''}`.toString());
-  },
-  restoreacc: async (el) => { const a = C.byId(doc().accounts, el.dataset.id); await commit('Restored account ' + a.name, () => { a.active = true; touch(a); }); },
-  movebills: () => {
-    const d = doc(), accs = (d.accounts || []).filter((a) => !a.del && a.active !== false);
-    const bills = C.liveBills(d).filter((b) => b.status !== 'stopped').sort((a, b) => C.accountName(d, a.accountId).localeCompare(C.accountName(d, b.accountId)) || a.name.localeCompare(b.name));
-    openSheet(h`<h2>Move bills to another account</h2><form data-form="movebills" class="stack-lg"><label class="field">Move to<select name="to">${accs.map((a) => opt(a.id, a.name))}</select></label>
-      <label class="switch"><span class="small">Also link to the day-before savings transfer</span><input type="checkbox" name="link"></label>
-      <div class="card list" style="max-height:45vh;overflow:auto">${bills.map((b) => h`<label class="item" style="cursor:pointer"><input type="checkbox" name="b" value="${b.id}" style="width:22px;height:22px"><span class="grow stack" style="gap:2px"><span class="t">${b.name}</span><span class="s">${C.accountName(d, b.accountId)}</span></span></label>`)}</div>
-      <div class="xs muted">Each moved bill gets a “tell the provider” to-do until you tick it.</div><button class="btn" type="submit">Move selected</button></form>`.toString());
-  },
-  edittype: (el) => {
-    const d = doc(), t = C.byId(d.types, el.dataset.id) || { id: '', name: '', color: PALETTE.find(([c]) => !(d.types || []).some((x) => !x.del && x.color === c))?.[0] || '#2a78d6' };
-    const n = C.liveBills(d).filter((b) => b.typeId === t.id).length;
-    const s = openSheet(h`<h2>${t.id ? 'Edit type' : 'Add a type'}</h2><form data-form="type" data-id="${t.id}" class="stack-lg"><label class="field">Name<input name="name" value="${t.name}" required></label>
-      <div class="stack" style="gap:8px"><span class="field" style="gap:0">Colour</span><div style="display:grid;grid-template-columns:repeat(9,minmax(0,1fr));gap:6px">${PALETTE.map(([c, l]) => h`<label style="position:relative;height:38px;border-radius:8px;background:${c};border:3px solid ${c === t.color ? '#15202B' : '#fff'};outline:1px solid var(--line)" title="${l}"><input type="radio" name="color" value="${c}" ${c === t.color ? 'checked' : ''} aria-label="${l}" style="position:absolute;opacity:0;inset:0;margin:0"></label>`)}</div><span class="xs muted" id="clash"></span></div>
-      <button class="btn" type="submit">Save</button></form>${t.id ? (n ? h`<div class="small muted">${n} bills use this type — move them to another type before deleting it.</div>` : h`<button class="btn danger small" data-act="deltype" data-id="${t.id}">Delete type</button>`) : ''}`.toString());
-    s.addEventListener('change', (e) => { if (e.target.name === 'color') { s.querySelectorAll('input[name=color]').forEach((i) => { i.parentElement.style.borderColor = i.checked ? '#15202B' : '#fff'; }); const other = (d.types || []).find((x) => !x.del && x.id !== t.id && x.color === e.target.value); s.querySelector('#clash').textContent = other ? 'Also used by ' + other.name + ' — pick another so they’re easy to tell apart.' : ''; } });
-  },
-  deltype: async (el) => { const t = C.byId(doc().types, el.dataset.id); closeSheet(); await commit('Deleted type ' + t.name, () => { touch(t); t.del = true; }); },
-  editprop: (el) => {
-    const d = doc(), p = C.byId(d.properties, el.dataset.id) || { id: '', name: '', status: 'active', manager: '', expectedWeekly: '' };
-    openSheet(h`<h2>${p.id ? 'Edit property' : 'Add a property'}</h2><form data-form="property" data-id="${p.id}" class="stack-lg"><label class="field">Name<input name="name" value="${p.name}" required></label><label class="field">Managed by<input name="manager" value="${p.manager || ''}"></label>
-      <div class="grid2"><label class="field">Status<select name="status">${opt('active', 'Owned', p.status)}${opt('expected', 'Not rented yet', p.status)}${opt('sold', 'Sold', p.status)}</select></label><label class="field">Sold on (if sold)<input type="date" name="soldAt" value="${p.soldAt || ''}"></label></div>
-      <label class="field">Expected rent per week (before it's rented)<input class="money" type="number" step="0.01" name="expectedWeekly" value="${p.expectedWeekly ?? ''}"></label>
-      <label class="field">Vacant from / to (optional — rent stops for those days)<span class="grid2"><input type="date" name="vacFrom"><input type="date" name="vacTo"></span></label>
-      <button class="btn" type="submit">Save</button></form>`.toString());
-  },
-  rent: (el) => {
-    const d = doc(), p = C.byId(d.properties, el.dataset.id);
-    const rents = (p.rents || []).filter((r) => !r.del).sort((a, b) => (a.from < b.from ? 1 : -1));
-    openSheet(h`<h2>Rent — ${p.name}</h2><form data-form="rent" data-id="${p.id}" class="stack-lg"><div class="grid2"><label class="field">Rent per week<input class="money" type="number" step="0.01" name="weekly" required value="${rents[0] ? '' : p.expectedWeekly || ''}" placeholder="${rents[0] ? rents[0].weekly : ''}"></label><label class="field">From<input type="date" name="from" value="${today()}" required></label></div><span class="xs muted">The full rent before the agent's fees (record their fee as a bill “taken from rent”).</span><button class="btn" type="submit">Save rent</button></form>
-      ${rents.length ? h`<div class="card list">${rents.map((r) => h`<div class="item"><span class="grow">${C.money(r.weekly)} a week from ${C.fmtDate(r.from, { year: true, dow: false })}</span><button class="btn small ghost" data-act="delrent" data-prop="${p.id}" data-id="${r.id}">Remove</button></div>`)}</div>` : ''}`.toString());
-  },
-  delrent: async (el) => { const p = C.byId(doc().properties, el.dataset.prop); const r = p.rents.find((x) => x.id === el.dataset.id); closeSheet(); await commit('Removed a rent entry for ' + p.name, () => { r.del = true; touch(p); }); },
-  editother: (el) => { const o = C.byId(doc().others, el.dataset.id) || { id: '', name: '' }; openSheet(h`<h2>${o.id ? 'Rename' : 'Add someone'}</h2><form data-form="other" data-id="${o.id}" class="stack-lg"><label class="field">Name<input name="name" value="${o.name}" placeholder="e.g. Dad — Moulden unit" required></label><button class="btn" type="submit">Save</button></form>`.toString()); },
-  newtopic: async () => { const rnd = Array.from(crypto.getRandomValues(new Uint8Array(18)), (x) => 'abcdefghijkmnopqrstuvwxyz23456789'[x % 33]).join(''); await commit('Created the alert topic', (dd) => { dd.settings.ntfy = { ...(dd.settings.ntfy || {}), server: (dd.settings.ntfy && dd.settings.ntfy.server) || 'https://ntfy.sh', topic: 'bills-' + rnd }; touch(dd.settings); }); },
-  testalert: async () => {
-    const n = doc().settings.ntfy;
-    try {
-      const r = await fetch((n.server || 'https://ntfy.sh').replace(/\/$/, '') + '/', { method: 'POST', body: JSON.stringify({ topic: n.topic, title: 'Bills test alert', message: 'If you can read this on your phone, alerts are working. Sent by ' + who() + '.', tags: ['white_check_mark'] }) });
-      toast(r.ok ? 'Sent — check your phone' : 'ntfy said ' + r.status);
-    } catch (e) { toast('Could not reach the alert server'); }
-  },
-  syncnow: () => doSync(true),
-  setupcode: async () => {
-    const box = document.getElementById('setupcode');
-    box.innerHTML = '<div class="small muted">Making the code…</div>';
-    const code = await makeSetupCode({ owner: S.dev.github.owner, repo: S.dev.github.repo, token: S.dev.github.token }, S.dev.passphrase);
-    let svg = '';
-    try { const q = window.qrcode(0, 'L'); q.addData(code); q.make(); svg = q.createSvgTag({ cellSize: 3, margin: 2, scalable: true }); } catch (e) { svg = ''; }
-    box.innerHTML = h`${svg ? h`<div style="background:#fff;border-radius:12px;padding:8px;max-width:280px;align-self:center">${raw(svg)}</div>` : ''}<div class="mono xs" style="word-break:break-all;background:var(--bg);border-radius:8px;padding:10px;max-height:120px;overflow:auto">${code}</div><button class="btn small ghost" data-act="copy" data-v="${code}">Copy code</button>`.toString();
-    box.className = 'stack';
-  },
-  history: async () => {
-    const box = document.getElementById('history');
-    box.innerHTML = '<div class="small muted">Loading…</div>';
-    try {
-      const list = await St.ghHistory(S.dev.github, 'data.enc.json');
-      box.innerHTML = h`<div class="list">${list.map((c, i) => h`<div class="item" style="padding-left:0"><span class="grow stack" style="gap:2px"><span class="t" style="font-size:14px">${new Date(c.date).toLocaleString('en-AU', { dateStyle: 'medium', timeStyle: 'short' })}</span><span class="s">${c.message}</span></span>${i === 0 ? h`<span class="xs muted">Current</span>` : h`<button class="btn small ghost" data-act="restorever" data-sha="${c.sha}" data-when="${new Date(c.date).toLocaleString('en-AU', { dateStyle: 'medium', timeStyle: 'short' })}">Restore</button>`}</div>`)}</div>`.toString();
-    } catch (e) { box.innerHTML = h`<div class="banner red">${e.message}</div>`.toString(); }
-  },
-  restorever: async (el) => {
-    if (!(await confirmSheet('Restore the version from ' + el.dataset.when + '?', 'Both phones go back to how things were then. The current version stays in the history, so this can be undone.', 'Restore', true))) return;
-    try {
-      if (DB.isOn(S.dev)) await DB.snapshot(S.doc, S.dev, saveDev, dbxClient(), 'before-restore').catch(() => {});
-      await replaceDoc(await St.loadVersion(S.dev, el.dataset.sha), 'Restored the version from ' + el.dataset.when);
-    } catch (e) { toast(e.message, 5000); }
-  },
-  dbxconnect: async () => {
-    if (!navigator.onLine) return toast("You're offline — connect Dropbox when you have internet");
-    await DB.startConnect(S.dev, saveDev);
-  },
-  dbxsync: () => doDbx(true),
-  dbxsnap: async () => {
-    try { await DB.snapshot(S.doc, S.dev, saveDev, dbxClient(), 'manual'); toast('Snapshot saved to Dropbox'); } catch (e) { toast(e.message, 5000); }
-  },
-  dbxlist: async () => {
-    const s = openSheet('<h2>Dropbox snapshots</h2><div class="small muted">Loading…</div>');
-    try {
-      const list = await DB.listSnapshots(dbxClient());
-      s.innerHTML = h`<h2>Dropbox snapshots</h2><div class="small muted">One a day for ${DB.KEEP_DAYS} days, plus one before every restore. Restoring puts both phones back to that copy; a snapshot of what's here now is saved first.</div>
-        <div class="list">${list.length ? list.map((x) => h`<div class="item" style="padding-left:0"><span class="grow stack" style="gap:2px"><span class="t" style="font-size:14px">${x.name.replace(/^bills-|\.enc\.json$/g, '').replace(/-(\d{2})(\d{2})-/, ' $1:$2 · ').replace(/-/g, ' ').replace(/^(\d{4}) (\d{2}) (\d{2})/, '$3/$2/$1')}</span><span class="s">${x.when ? 'Saved ' + new Date(x.when).toLocaleString('en-AU', { dateStyle: 'medium', timeStyle: 'short' }) : ''}</span></span><button class="btn small ghost" data-act="dbxrestore" data-path="${x.path}" data-name="${x.name}">Restore</button></div>`) : h`<div class="empty">No snapshots yet — the first is made today.</div>`}</div>
-        <button class="btn ghost" data-act="closesheet">Close</button>`.toString();
-    } catch (e) { s.innerHTML = h`<h2>Dropbox snapshots</h2><div class="banner red">${e.message}</div><button class="btn ghost" data-act="closesheet">Close</button>`.toString(); }
-  },
-  dbxrestore: async (el) => {
-    closeSheet();
-    if (!(await confirmSheet('Restore this Dropbox snapshot?', 'Both phones go back to the bills as they were in <b>' + el.dataset.name + '</b>. A snapshot of what\'s here now is saved to Dropbox first, so this can be undone.', 'Restore', true))) return;
-    try {
-      const cl = dbxClient();
-      const old = await DB.readSnapshot(cl, el.dataset.path, S.dev.passphrase);
-      if (S.doc) await DB.snapshot(S.doc, S.dev, saveDev, cl, 'before-restore');
-      if (!S.doc) { S.doc = St.joinDoc(); }
-      await replaceDoc(old, 'Restored Dropbox snapshot ' + el.dataset.name);
-      await doDbx();
-      toast('Restored from Dropbox');
-    } catch (e) { toast(e.message, 5000); }
-  },
-  dbxoff: async () => {
-    if (!(await confirmSheet('Disconnect Dropbox on this phone?', 'Your bills stay on this phone and in GitHub. The copy and snapshots already in Dropbox are kept.', 'Disconnect', true))) return;
-    S.dev.dbx = null; await saveDev(); S.dbx = 'off'; render();
-  },
-  closesheet: () => closeSheet(),
-  draftdiscard: async (el) => {
-    if (!(await confirmSheet('Discard what you typed?', 'The ' + (el.dataset.id ? 'bill goes back to how it was saved' : 'unfinished bill is cleared') + '.', 'Discard', true))) return;
-    clearDraft(el.dataset.id); lastRoute = null; render();
-  },
-  dlbackup: async () => {
-    if (!S.dev.passphrase) {
-      const pass = prompt('Choose a passphrase to lock the backup file (write it down):');
-      if (!pass || pass.length < 8) return toast('Use at least 8 characters');
-      S.dev.passphrase = pass; await St.saveDevice(S.dev);
+/* ================= collection checklist (by denomination, for coin fairs) ================= */
+const ckOpts=()=>S.ck||(S.ck={off:[],split:true,wants:true,money:true,photos:true,sold:false});
+const dKey=k=>k&&DENOMS.some(d=>d.k===k)?k:"Other";
+function ckRows(o){ const rows=[];
+  for(const c of S.coins.filter(c=>o.sold||isOwned(c))){ const items=c.isSet?(c.setItems||[]):[];
+    if(o.split&&items.length){ const sn=nameParts(c).main; items.forEach((it,i)=>rows.push({c,it,denom:dKey(it.denom||c.denom),year:it.year||c.year,name:nameParts(it).main,sub:[nameParts(it).main.startsWith(sn)?`Part of a set of ${items.length}`:"In set: "+sn,it.mintage?"Mintage "+fmtNum(it.mintage):""],mint:it.mint||c.mint,first:i===0})); }
+    else rows.push({c,denom:dKey(c.denom),year:c.year,name:nameParts(c).main,sub:[c.series&&!nameParts(c).main.toLowerCase().includes(String(c.series).toLowerCase())?c.series:"",c.isSet?`Set of ${setSize(c)}`+(items.length?": "+items.map(it=>setItemLabel(it,setCommon(items))).join(", "):""):"",c.mintage?"Mintage "+fmtNum(c.mintage):""],mint:c.mint}); }
+  for(const r of rows){ const c=r.c; r.sub=[...r.sub,c.variety,c.colourised?"Coloured":"",isOwned(c)?"":c.status].filter(Boolean); if(r.mint==="None") r.mint=""; r.grade=gradeText(c)||({"Uncirculated":"UNC","Frosted uncirculated":"Frosted UNC","Proof":"Proof","Specimen":"Specimen","Circulating":"Circ."}[c.finish]||""); r.pack=c.packaging||""; r.qty=qtyOf(c); }
+  return rows; }
+function ckSections(o){ const rows=ckRows(o), wants=o.wants?S.wanted.filter(w=>!w.got):[]; const m=new Map();
+  const get=k=>{ if(!m.has(k)) m.set(k,{k,rows:[],wants:[]}); return m.get(k); };
+  for(const r of rows) get(r.denom).rows.push(r); for(const w of wants) get(dKey(w.denom)).wants.push(w);
+  const yr=x=>{ const n=String(x.year||"").match(/\d{4}/); return n?+n[0]:9999; };
+  const secs=[...m.values()].sort((a,b)=>DENOMS.findIndex(d=>d.k===a.k)-DENOMS.findIndex(d=>d.k===b.k));
+  for(const s of secs){ s.rows.sort((a,b)=>yr(a)-yr(b)||a.name.localeCompare(b.name)); s.wants.sort((a,b)=>yr(a)-yr(b)); const seen=new Set(); for(const r of s.rows) if(r.it){ r.first=!seen.has(r.c.id); seen.add(r.c.id); }
+    s.coins=s.rows.reduce((a,r)=>a+r.qty*(r.it||!r.c.isSet?1:setSize(r.c)),0);
+    s.value=s.rows.reduce((a,r)=>a+(r.it&&!r.first||blank(r.c.value)?0:+r.c.value*r.qty),0);
+    s.cost=s.rows.reduce((a,r)=>{ const p=costEach(r.c); return a+(r.it&&!r.first||p==null?0:p*r.qty); },0); }
+  return secs; }
+const dLabel=k=>({"$10":"$10 coins","$5":"$5 coins","$2":"$2 coins","$1":"$1 coins","50c":"50c coins","20c":"20c coins","10c":"10c coins","5c":"5c coins","2c":"2c coins","1c":"1c coins","Crown":"Crowns","Florin":"Florins","Shilling":"Shillings","Sixpence":"Sixpences","Threepence":"Threepences","Penny":"Pennies","Halfpenny":"Halfpennies","Other":"Other / not set"}[k]||k);
+function viewChecklist(){ const o=ckOpts(); const secs=ckSections(o);
+  return `<section class="view">${backMore}<div class="panel"><h3>Collection checklist</h3><p class="m0">Everything you have, sorted by denomination then year, with the wants you're still hunting for under each one. Save the PDF to your phone and it works offline at a coin fair.</p>
+  <div class="flabel" style="margin-top:4px">Denominations</div>
+  <div class="ckd">${secs.map(s=>`<label class="check-inline"><input type="checkbox" data-ckd="${esc(s.k)}" ${o.off.includes(s.k)?"":"checked"}><span><b>${esc(dLabel(s.k))}</b> <span class="muted small">${s.coins} owned${s.wants.length?` · ${s.wants.length} wanted`:""}</span></span></label>`).join("")||`<p class="m0 muted small">No coins yet.</p>`}</div>
+  <div class="flabel" style="margin-top:4px">Include</div>
+  <label class="check-inline"><input type="checkbox" id="ckSplit" ${o.split?"checked":""}><span>List each coin in a set on its own line</span></label>
+  <label class="check-inline"><input type="checkbox" id="ckWants" ${o.wants?"checked":""}><span>"Still looking for" — my wants list, with the most I'll pay</span></label>
+  <label class="check-inline"><input type="checkbox" id="ckMoney" ${o.money?"checked":""}><span>What I paid and current value</span></label>
+  <label class="check-inline"><input type="checkbox" id="ckPhotos" ${o.photos?"checked":""}><span>Picture of each coin — the Numista reverse (design side)</span></label>
+  <label class="check-inline"><input type="checkbox" id="ckSold" ${o.sold?"checked":""}><span>Include sold and traded coins</span></label>
+  <button type="button" class="btn primary" data-mkck>Create PDF</button><div class="row" id="repOut"></div></div></section>`; }
+/* checklist picture: the Numista reverse (design side); otherwise another reference reverse, then my own reverse */
+function ckPhoto(r){ const rev=ph=>{ ph=ph||[]; return ph.find(p=>!p.mine&&p.side==="Reverse"&&p.source==="Numista")||ph.find(p=>!p.mine&&p.side==="Reverse")||ph.find(p=>p.mine&&p.side==="Reverse")||null; };
+  if(r.it) return rev(r.it.photos); return rev(r.c.photos)||((r.c.setItems||[]).map(it=>rev(it.photos)).find(Boolean))||null; }
+async function makeChecklist(){
+  const o=ckOpts(), out=$("#repOut"), say=m=>{ if(out) out.innerHTML=`<span class="muted small">${esc(m)}</span>`; };
+  const secs=ckSections(o).filter(s=>!o.off.includes(s.k)&&(s.rows.length||s.wants.length)); if(!secs.length){ say("Tick at least one denomination."); return; }
+  say("Making the PDF…"); await loadJsPDF();
+  const { jsPDF }=window.jspdf; const doc=new jsPDF({unit:"mm",format:"a4"}); const W=210, M=14, BOT=283, IW=W-2*M;
+  const PH=o.photos?11:0, MON=o.money?29:0;
+  const cols=[...(o.photos?[["",PH]]:[]),["Year",13],["Coin",IW-PH-13-14-17-21-9-MON],["Mint",14],["Grade",17],["Pack",21],["Qty",9],...(o.money?[["Paid",14.5],["Value",14.5]]:[])];
+  const hex=h=>[1,3,5].map(i=>parseInt(h.slice(i,i+2),16));
+  let y=M;
+  const tC=secs.reduce((a,s)=>a+s.coins,0), tR=secs.reduce((a,s)=>a+s.rows.length,0), tV=secs.reduce((a,s)=>a+s.value,0), tP=secs.reduce((a,s)=>a+s.cost,0), tW=secs.reduce((a,s)=>a+s.wants.length,0);
+  doc.setFont("helvetica","bold"); doc.setFontSize(16); doc.setTextColor(49,46,129); doc.text("Coin collection checklist",M,y+5); y+=10;
+  doc.setFont("helvetica","normal"); doc.setFontSize(9.5); doc.setTextColor(60,60,60);
+  doc.text(pdfTxt(`${fmtDate(todayISO())}  ·  ${tC} coins on ${tR} lines${o.wants?`  ·  ${tW} wanted`:""}${o.money?`  ·  Paid ${aud(Math.round(tP))||"$0"}  ·  Value ${aud(Math.round(tV))||"$0"}`:""}`),M,y+3); y+=8;
+  /* summary */
+  doc.setFillColor(238,242,255); doc.rect(M,y,IW,6.5,"F"); doc.setFont("helvetica","bold"); doc.setFontSize(8.5); doc.setTextColor(49,46,129);
+  const sc=[["Denomination",60],["Lines",22],["Coins",22],["Wanted",22],...(o.money?[["Paid",28],["Value",28]]:[])];
+  let x=M+1.5; for(const [h,w] of sc){ doc.text(h,x,y+4.5); x+=w; } y+=7.5; doc.setFont("helvetica","normal"); doc.setTextColor(20,20,20);
+  for(const s of secs){ x=M+1.5; const g=GROUPS[dInfo(s.k).grp]||GROUPS.other; doc.setFillColor(...hex(g.solid)); doc.circle(x+1.2,y+2.6,1.2,"F");
+    for(const [v,w] of [[dLabel(s.k),60],[String(s.rows.length),22],[String(s.coins),22],[String(s.wants.length||""),22],...(o.money?[[s.cost?aud(Math.round(s.cost)):"",28],[s.value?aud(Math.round(s.value)):"",28]]:[])]){ doc.text(pdfTxt(v),x+(w===60?4:0),y+3.8); x+=w; }
+    y+=5.4; }
+  doc.setDrawColor(225,228,236); doc.line(M,y,W-M,y); y+=5;
+  const head=()=>{ doc.setFillColor(245,246,251); doc.rect(M,y,IW,6,"F"); doc.setFont("helvetica","bold"); doc.setFontSize(7.8); doc.setTextColor(75,85,99); let x=M+1.5; for(const [h,w] of cols){ doc.text(h,x,y+4.2); x+=w; } y+=7; doc.setFont("helvetica","normal"); doc.setTextColor(20,20,20); };
+  const band=(s,cont)=>{ const g=GROUPS[dInfo(s.k).grp]||GROUPS.other; doc.setFillColor(...hex(g.solid)); doc.roundedRect(M,y,IW,8,1.5,1.5,"F"); doc.setFont("helvetica","bold"); doc.setFontSize(11); doc.setTextColor(255,255,255);
+    doc.text(pdfTxt(dLabel(s.k)+(cont?" (continued)":"")),M+3,y+5.6); doc.setFontSize(8.5); doc.setFont("helvetica","normal");
+    doc.text(pdfTxt(`${s.coins} coin${s.coins===1?"":"s"}${s.wants.length?` · ${s.wants.length} wanted`:""}${o.money&&s.value?` · value ${aud(Math.round(s.value))}`:""}`),W-M-3,y+5.6,{align:"right"}); y+=10; doc.setTextColor(20,20,20); };
+  let n=0; const total=secs.reduce((a,s)=>a+s.rows.length,0);
+  for(const s of secs){
+    if(y+30>BOT){ doc.addPage(); y=M; }
+    band(s,false);
+    if(s.rows.length){ head();
+      for(const r of s.rows){ if(out&&++n%5===0) say(`Adding ${n} of ${total}…`);
+        const cw=cols.find(c=>c[0]==="Coin")[1]-3;
+        doc.setFont("helvetica","bold"); doc.setFontSize(8.8); const tl=doc.splitTextToSize(pdfTxt(r.name),cw); doc.setFont("helvetica","normal"); doc.setFontSize(7.6); const sl=r.sub.length?doc.splitTextToSize(pdfTxt(r.sub.join(" · ")),cw):[];
+        const pl=doc.splitTextToSize(pdfTxt(r.pack),20), ml=doc.splitTextToSize(pdfTxt(r.mint||""),13); const h=Math.max(o.photos?12:7,tl.length*3.7+sl.length*3.2+3,pl.length*3.2+3,ml.length*3.2+3,String(r.year||"").length>6?9:0);
+        if(y+h>BOT){ doc.addPage(); y=M; band(s,true); head(); }
+        let x=M+1.5;
+        if(o.photos){ const ph=ckPhoto(r); const dt=ph?await imgData(ph):null; if(dt) doc.addImage(dt,"JPEG",x-0.5,y+0.5,10,10); x+=PH; }
+        doc.setFontSize(8.8); doc.setFont("helvetica","bold"); { let yt=pdfTxt(String(r.year||"-")); if(doc.getTextWidth(yt)>12) yt=yt.replace(/\s*-\s*/,"-\n"); doc.text(yt.split("\n"),x,y+4); } x+=13;
+        doc.text(tl,x,y+4); doc.setFont("helvetica","normal"); if(sl.length){ doc.setFontSize(7.6); doc.setTextColor(95,95,95); doc.text(sl,x,y+4+tl.length*3.7); doc.setTextColor(20,20,20); } x+=cols.find(c=>c[0]==="Coin")[1];
+        doc.setFontSize(7.6); doc.text(doc.splitTextToSize(pdfTxt(r.mint||""),13),x,y+4); doc.setFontSize(8.3); x+=14; doc.text(pdfTxt(r.grade),x,y+4); x+=17; doc.setFontSize(7.6); doc.text(pl,x,y+4); x+=21; doc.setFontSize(8.3);
+        doc.text(r.qty>1?"x"+r.qty:"1",x,y+4); x+=9;
+        if(o.money){ if(r.it&&!r.first){ doc.setTextColor(150,150,150); doc.text("in set",x,y+4); doc.setTextColor(20,20,20); } else { const p=costEach(r.c); doc.text(pdfTxt(p!=null?aud(p*(r.it?1:1)):""),x,y+4); x+=14.5; doc.text(pdfTxt(blank(r.c.value)?"":aud(r.c.value)),x,y+4); if(r.it){ doc.setFontSize(6.5); doc.setTextColor(150,150,150); doc.text("whole set",x-14.5,y+7.2); doc.setTextColor(20,20,20); } } }
+        y+=h; doc.setDrawColor(232,234,240); doc.line(M,y,W-M,y); y+=0.8; }
     }
-    download('bills-backup-' + today() + '.json', await St.lockedBackupFile(S.doc, S.dev));
-  },
-  restorefile: async () => {
-    const f = await pickFile(); if (!f) return;
-    try {
-      let j = JSON.parse(f.text), d;
-      if (St.looksLikeDoc(j)) d = j;
-      else { const pass = prompt('Passphrase for this backup:'); if (!pass) return; d = await St.readBackupFile(f.text, pass); if (!S.dev.passphrase) { S.dev.passphrase = pass; await St.saveDevice(S.dev); } }
-      if (S.doc && !(await confirmSheet('Replace what\'s on this phone?', 'The backup will be merged with what\'s here; where both changed the same thing, the newer change wins.', 'Restore'))) return;
-      clampStamps(d);
-      S.doc = S.doc ? C.mergeDocs(S.doc, d) : d;
-      await St.saveLocal(S.doc); await askName(); location.hash = '#/'; render(); queueSync(500); toast('Restored');
-    } catch (e) { toast(e.message, 5000); }
-  },
-  importfile: async () => {
-    const f = await pickFile(); if (!f) return;
-    try {
-      const j = JSON.parse(f.text);
-      if (!St.looksLikeDoc(j)) { if (j.ct) { const pass = prompt('Passphrase for this backup:'); if (!pass) return; S.doc = await St.readBackupFile(f.text, pass); if (!S.dev.passphrase) S.dev.passphrase = pass; await St.saveLocal(S.doc); await St.saveDevice(S.dev); await askName(); location.hash = '#/'; return; } throw new Error("That isn't a Bills import file"); }
-      if (!j.trackedFrom) j.trackedFrom = today();
-      clampStamps(j);
-      S.doc = S.doc ? C.mergeDocs(S.doc, j) : j;
-      await St.saveLocal(S.doc); await askName();
-      location.hash = '#/'; toast('Imported ' + C.liveBills(S.doc).length + ' bills');
-    } catch (e) { toast(e.message, 5000); }
-  },
-  startempty: async () => { S.doc = St.emptyDoc(); S.doc.trackedFrom = today(); S.doc.people = [{ id: C.uid('pe'), name: 'Me', pays: [], u: Date.now() }]; await St.saveLocal(S.doc); await askName(); location.hash = '#/'; },
-  disconnect: async () => {
-    if (!(await confirmSheet('Disconnect this phone?', 'Your bills stay on this phone, but it stops syncing and backing up. The other phone and GitHub are not changed.', 'Disconnect', true))) return;
-    S.dev.github = null; S.dev.passphrase = ''; S.dev.salt = null; await St.saveDevice(S.dev); S.sync = 'off'; render();
-  },
-  'rename-device': async () => { await askName(true); render(); },
-  csv: () => download('bills-register-' + today() + '.csv', registerCSV(), 'text/csv'),
-  rkind: (el) => { S.ui.rKind = el.dataset.v; S.ui.rAnchor = today(); S.ui.rSel = null; render(); },
-  rshift: (el) => { S.ui.rAnchor = C.shiftPeriod(S.ui.rKind, S.ui.rAnchor || today(), Number(el.dataset.v)); S.ui.rSel = null; render(); },
-  rinv: (el) => { S.ui.rInv = el.checked; render(); },
-  rtable: () => { S.ui.rTable = !S.ui.rTable; render(); },
-  rsel: (el) => { S.ui.rSel = el.dataset.v; render(); },
-  print: () => window.print(),
-  scan: () => startScan(),
-};
-function syncChipPressed(root) {
-  const upd = () => root.querySelectorAll('label.chip').forEach((l) => { const i = l.querySelector('input'); if (i) l.setAttribute('aria-pressed', i.checked ? 'true' : 'false'); });
-  root.addEventListener('change', upd); upd();
-}
-async function askName(force) {
-  if (S.dev.name && !force) return;
-  const n = prompt('Whose phone is this? (shown next to changes you make)', S.dev.name || 'Shaun');
-  if (n) { S.dev.name = n.trim().slice(0, 30); await St.saveDevice(S.dev); }
-}
-
-// ---------- forms ----------
-const F = {
-  payedit: async (form) => {
-    const d = doc(), b = C.byId(d.bills, form.dataset.bill), due = form.dataset.due, fd = new FormData(form);
-    const date = fd.get('date'), amount = fd.get('amount') === '' ? null : Number(fd.get('amount')), note = (fd.get('note') || '').trim();
-    if (!C.isISO(date)) return toast('Pick the date it was paid');
-    if (amount !== null && !(amount >= 0)) return toast('Check the amount');
-    const ex = C.paymentFor(d, b.id, due), rec = ex && ex.status !== 'missed' ? ex : null;
-    const was = rec && rec.date && rec.date !== date ? ' (was ' + C.fmtDate(rec.date, { dow: false }) + ')' : '';
-    closeSheet();
-    await commit((rec ? 'Changed ' : 'Recorded ') + b.name + ' payment: ' + (date > today() ? 'scheduled ' : 'paid ') + C.fmtDate(date, { dow: false }) + was + (amount !== null ? ' · ' + C.money(amount) : ''), (dd) => {
-      if (rec) { Object.assign(rec, { date, amount: amount ?? C.amountOn(b, due, dd), note }); touch(rec); }
-      else { if (ex) { touch(ex); ex.del = true; } dd.payments.push(touch({ id: C.uid('pm'), billId: b.id, due, date, amount: amount ?? C.amountOn(b, due, dd), note, status: 'paid' })); }
-    });
-    toast(date > today() ? 'Scheduled for ' + C.fmtDate(date) : 'Payment saved');
-  },
-  bill: (form) => saveBillForm(form),
-  review: async (form) => {
-    const fd = new FormData(form), b = C.byId(doc().bills, form.dataset.id), date = fd.get('date') || today();
-    if (date > today()) return toast("The date can't be in the future");
-    closeSheet();
-    await commit('Reviewed ' + b.name + ' — ' + fd.get('outcome'), () => { b.review = b.review || {}; b.review.applicable = true; b.review.last = date; b.review.log = (b.review.log || []).concat([{ date, outcome: fd.get('outcome'), note: fd.get('note') || '', by: who() }]); touch(b); });
-    toast('Review saved — next one ' + C.fmtDate(C.addMonths(date, 12), { year: true, dow: false }));
-  },
-  newamount: async (form) => {
-    const fd = new FormData(form), b = C.byId(doc().bills, form.dataset.id);
-    const v = Number(fd.get('amount')), from = fd.get('from');
-    if (!(v >= 0) || fd.get('amount') === '' || !C.isISO(from)) return toast('Enter the amount and start date');
-    const old = C.baseAmountOn(b, from);
-    closeSheet();
-    await commit(b.name + ' ' + C.money(old) + ' → ' + C.money(v) + ' from ' + C.fmtDate(from, { dow: false, year: true }), () => { b.amounts = (b.amounts || []).filter((a) => a.from !== from).concat([{ id: C.uid('am'), from, amount: v, note: fd.get('note') || 'Changed by ' + who() }]); touch(b); });
-  },
-  payday: async (form) => { const v = new FormData(form).get('base'); if (!C.isISO(v)) return toast('Pick a payday'); await commit('Payday set to every 2nd ' + C.dowName(C.dow(v), true), (dd) => { dd.settings.payday = { base: v }; touch(dd.settings); }); toast('Saved'); },
-  pay: async (form) => {
-    const fd = new FormData(form), p = C.byId(doc().people, form.dataset.id);
-    const th = fd.get('takeHome') === '' ? null : Number(fd.get('takeHome')), gr = fd.get('gross') === '' ? null : Number(fd.get('gross'));
-    if (th === null && gr === null) return toast('Enter at least the take-home pay');
-    const from = fd.get('from');
-    await commit(p.name + "'s pay from " + C.fmtDate(from, { dow: false }) + ': ' + C.money(th), () => { p.pays = (p.pays || []).filter((x) => x.from !== from).concat([{ id: C.uid('py'), from, takeHome: th, gross: gr }]); touch(p); });
-    toast('Saved');
-  },
-  override: async (form) => {
-    const fd = new FormData(form);
-    const o = { id: C.uid('po'), personId: fd.get('personId'), date: fd.get('date'), takeHome: fd.get('takeHome') === '' ? null : Number(fd.get('takeHome')), gross: fd.get('gross') === '' ? null : Number(fd.get('gross')), note: fd.get('note') || '' };
-    if (o.takeHome === null && o.gross === null) return toast('Enter an amount');
-    closeSheet(); await commit('One-off pay change for ' + C.fmtDate(o.date, { dow: false }), (dd) => { dd.payOverrides = (dd.payOverrides || []).concat([touch(o)]); });
-  },
-  trset: async (form) => { const v = form.querySelector('[name=transferCheck]').checked; await commit('Transfer alerts ' + (v ? 'on' : 'off'), (dd) => { dd.settings.reminders.transferCheck = v; touch(dd.settings); }); },
-  alerts: async (form) => {
-    const fd = new FormData(form);
-    await commit('Changed alert settings', (dd) => {
-      const r = dd.settings.reminders;
-      r.digestDays = Number(fd.get('digestDays')); const l = Number(fd.get('lumpDays')); r.lumpDays = l ? [l] : []; r.reviewDays = Number(fd.get('reviewDays'));
-      r.weekly = fd.get('weekly') === 'on'; r.transferCheck = fd.get('transferCheck') === 'on';
-      dd.settings.ntfy.server = (fd.get('server') || 'https://ntfy.sh').trim(); touch(dd.settings);
-    });
-    toast('Saved');
-  },
-  account: async (form) => {
-    const fd = new FormData(form), id = form.dataset.id, name = (fd.get('name') || '').trim();
-    if (!name) return;
-    closeSheet();
-    await commit((id ? 'Edited account ' : 'Added account ') + name, (dd) => {
-      const a = id ? C.byId(dd.accounts, id) : { id: C.uid('a'), active: true };
-      a.name = name; a.kind = fd.get('kind'); a.note = fd.get('note') || ''; touch(a);
-      if (!id) dd.accounts.push(a);
-    });
-  },
-  removeacc: async (form) => {
-    const d = doc(), id = form.dataset.id, to = new FormData(form).get('to'), a = C.byId(d.accounts, id);
-    const list = C.liveBills(d).filter((b) => b.accountId === id && b.status !== 'stopped');
-    if (list.length && !to) return toast('Pick where the bills should go');
-    closeSheet();
-    await commit('Removed account ' + a.name + (list.length ? ' — moved ' + list.length + ' bills to ' + C.accountName(d, to) : ''), () => {
-      for (const b of list) { b.accountId = to; if (b.payMethod !== 'manual') b.todos = (b.todos || []).concat([{ id: C.uid('td'), text: 'Tell ' + (b.provider || 'the provider') + ' about the new account (' + C.accountName(d, to) + ')', done: false }]); touch(b); }
-      a.active = false; touch(a);
-    });
-  },
-  movebills: async (form) => {
-    const d = doc(), fd = new FormData(form), to = fd.get('to'), ids = fd.getAll('b'), link = fd.get('link') === 'on';
-    if (!ids.length) return toast('Tick the bills to move');
-    closeSheet();
-    await commit('Moved ' + ids.length + ' bills to ' + C.accountName(d, to), () => {
-      for (const id of ids) { const b = C.byId(d.bills, id); if (b.accountId === to) continue; b.accountId = to; if (link) b.transferDayBefore = true; if (b.payMethod !== 'manual') b.todos = (b.todos || []).concat([{ id: C.uid('td'), text: 'Tell ' + (b.provider || 'the provider') + ' about the new account (' + C.accountName(d, to) + ')', done: false }]); touch(b); }
-    });
-  },
-  type: async (form) => {
-    const fd = new FormData(form), id = form.dataset.id, name = (fd.get('name') || '').trim();
-    if (!name) return;
-    closeSheet();
-    await commit((id ? 'Edited type ' : 'Added type ') + name, (dd) => {
-      const t = id ? C.byId(dd.types, id) : { id: C.uid('t'), order: Math.max(0, ...dd.types.map((x) => x.order || 0)) + 1 };
-      t.name = name; t.color = fd.get('color') || t.color || '#2a78d6'; touch(t);
-      if (!id) dd.types.push(t);
-    });
-  },
-  property: async (form) => {
-    const fd = new FormData(form), id = form.dataset.id, name = (fd.get('name') || '').trim();
-    if (!name) return;
-    closeSheet();
-    await commit((id ? 'Edited property ' : 'Added property ') + name, (dd) => {
-      const p = id ? C.byId(dd.properties, id) : { id: C.uid('p'), rents: [], vacancies: [] };
-      p.name = name; p.manager = fd.get('manager') || ''; p.status = fd.get('status'); p.soldAt = fd.get('soldAt') || null;
-      p.expectedWeekly = fd.get('expectedWeekly') === '' ? null : Number(fd.get('expectedWeekly'));
-      if (p.status === 'sold' && !p.soldAt) p.soldAt = today();
-      if (C.isISO(fd.get('vacFrom'))) p.vacancies = (p.vacancies || []).concat([{ id: C.uid('v'), from: fd.get('vacFrom'), to: fd.get('vacTo') || null }]);
-      if (p.status === 'sold') for (const b of dd.bills) if (b.propertyId === p.id && b.status === 'active') { b.status = 'stopped'; b.stoppedAt = p.soldAt; touch(b); }
-      touch(p); if (!id) dd.properties.push(p);
-    });
-  },
-  rent: async (form) => {
-    const fd = new FormData(form), p = C.byId(doc().properties, form.dataset.id), w = Number(fd.get('weekly')), from = fd.get('from');
-    if (!(w > 0) || !C.isISO(from)) return toast('Enter the weekly rent and start date');
-    closeSheet();
-    await commit(p.name + ' rent ' + C.money(w) + '/wk from ' + C.fmtDate(from, { dow: false, year: true }), () => { p.rents = (p.rents || []).filter((r) => r.from !== from).concat([{ id: C.uid('r'), from, weekly: w }]); if (p.status === 'expected') p.status = 'active'; touch(p); });
-  },
-  other: async (form) => {
-    const fd = new FormData(form), id = form.dataset.id, name = (fd.get('name') || '').trim();
-    if (!name) return; closeSheet();
-    await commit((id ? 'Renamed ' : 'Added ') + name, (dd) => { const o = id ? C.byId(dd.others, id) : { id: C.uid('o') }; o.name = name; touch(o); if (!id) dd.others = (dd.others || []).concat([o]); });
-  },
-  connect: async (form) => {
-    const fd = new FormData(form);
-    const gh = { owner: fd.get('owner').trim(), repo: fd.get('repo').trim(), token: fd.get('token').trim() };
-    const pass = fd.get('pass'), name = fd.get('name').trim();
-    if (pass.length < 12) return toast('Use a passphrase of at least 12 characters');
-    if (pass !== fd.get('pass2')) return toast("The two passphrases don't match");
-    toast('Checking GitHub…', 8000);
-    try {
-      await St.ghCheck(gh);
-      S.dev = { ...S.dev, github: gh, passphrase: pass, name: name || S.dev.name };
-      if (S.doc) { touch(S.doc.settings); }
-      const restoring = !S.doc;
-      const r = await St.sync(S.doc || St.joinDoc(), S.dev, restoring ? 'Restored on this phone' : 'First backup');
-      if (restoring && !C.liveBills(r.doc).length && !r.doc.people.length) { const fresh = St.emptyDoc(); fresh.trackedFrom = today(); r.doc = C.mergeDocs(r.doc, fresh); }
-      S.doc = r.doc; await St.saveLocal(S.doc); await St.saveDevice(S.dev); S.sync = 'ok';
-      toast(restoring && C.liveBills(S.doc).length ? 'Your bills are back — ' + C.liveBills(S.doc).length + ' bills from GitHub' : 'Connected — your bills are backed up', 5000); if (restoring) await askName(); location.hash = restoring && C.liveBills(S.doc).length ? '#/' : '#/sync'; render(); queueDbx(1000);
-    } catch (e) { S.dev.github = null; toast(e.message, 6000); }
-  },
-  join: async (form) => {
-    const fd = new FormData(form);
-    try {
-      const gh = await readSetupCode(fd.get('code'), fd.get('pass'));
-      await St.ghCheck(gh);
-      S.dev = { ...S.dev, github: gh, passphrase: fd.get('pass'), name: fd.get('name').trim() || S.dev.name };
-      const r = await St.sync(S.doc || St.joinDoc(), S.dev, 'Joined');
-      S.doc = r.doc; await St.saveLocal(S.doc); await St.saveDevice(S.dev); S.sync = 'ok';
-      toast('Joined — ' + C.liveBills(S.doc).length + ' bills'); location.hash = '#/';
-    } catch (e) { toast(e.message, 6000); }
-  },
-};
-
-// ---------- QR scanning (Android Chrome) ----------
-async function startScan() {
-  if (!('BarcodeDetector' in window)) return toast('Scanning isn’t available here — paste the code instead');
-  const s = openSheet('<h2>Scan the setup code</h2><video playsinline muted style="width:100%;border-radius:12px;background:#000;max-height:50vh"></video><button class="btn ghost" data-act="closesheet">Cancel</button>');
-  const video = s.querySelector('video');
-  let stream;
-  try { stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } }); } catch { closeSheet(); return toast('Camera permission was refused'); }
-  video.srcObject = stream; await video.play();
-  const det = new window.BarcodeDetector({ formats: ['qr_code'] });
-  const stop = () => stream.getTracks().forEach((t) => t.stop());
-  s.querySelector('[data-act=closesheet]').onclick = () => { stop(); closeSheet(); };
-  const loop = async () => {
-    if (!document.body.contains(video)) return stop();
-    try { const codes = await det.detect(video); if (codes.length) { stop(); closeSheet(); const ta = document.querySelector('form[data-form=join] [name=code]'); if (ta) ta.value = codes[0].rawValue; toast('Code scanned — now type the passphrase'); return; } } catch {}
-    requestAnimationFrame(loop);
-  };
-  loop();
-}
-
-// ---------- Excel CSV (same columns as tab 11's Bills Register) ----------
-function registerCSV() {
-  const d = doc(), t = today();
-  const sheetCat = (b) => b.kind === 'investment' ? 'Properties' : b.typeId === 't_home' ? 'Properties' : b.typeId === 't_kids' ? 'Children' : (C.typeOf(d, b) || {}).name || 'Other';
-  const rows = [['Category', 'Bill Name', 'Amount ($)', 'Frequency', 'Due Date(s)', 'Provider / Company', 'Policy / Account #', 'Account Paid From', 'Review Applicable?', 'Last Reviewed', 'Reference Date', 'Notes']];
-  for (const b of C.liveBills(d).filter((x) => x.kind !== 'reminder' && x.status !== 'stopped' && !C.isOneOff(x))) {
-    const a = C.amountOn(b, C.nextDue(b, t) || t, d);
-    rows.push([sheetCat(b), b.name, a ?? '', b.freq || '', b.dueText || '', b.provider || '', b.accountNo || '', b.accountId ? C.accountName(d, b.accountId) : '', b.review && b.review.applicable ? 'YES' : 'NO', (b.review && b.review.last) || '', b.refDate || '', b.notes || '']);
+    if(s.wants.length){ if(y+16>BOT){ doc.addPage(); y=M; band(s,true); }
+      doc.setFont("helvetica","bold"); doc.setFontSize(9); doc.setTextColor(180,83,9); doc.text(s.rows.length?"Still looking for":"Wanted - none owned yet",M+1.5,y+4.5); y+=6.5; doc.setTextColor(20,20,20);
+      for(const w of s.wants){ doc.setFontSize(8.5); doc.setFont("helvetica","normal"); const wl=doc.splitTextToSize(pdfTxt([w.title,w.series&&!String(w.title||"").includes(w.series)?w.series:"",w.notes].filter(Boolean).join(" · ")),IW-13-34-8); const h=wl.length*3.6+2.5;
+        if(y+h>BOT){ doc.addPage(); y=M; band(s,true); }
+        doc.setDrawColor(180,83,9); doc.rect(M+1.5,y+1.2,3,3); doc.setFont("helvetica","bold"); doc.text(pdfTxt(String(w.year||"")),M+7,y+4); doc.setFont("helvetica","normal"); doc.text(wl,M+20,y+4);
+        if(!blank(w.target)) doc.text(pdfTxt("up to "+aud(w.target)),W-M-2,y+4,{align:"right"}); y+=h; }
+    }
+    y+=5;
   }
-  return rows.map((r) => r.map((v) => { const s = String(v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }).join(',')).join('\r\n');
+  const pages=doc.getNumberOfPages(); for(let i=1;i<=pages;i++){ doc.setPage(i); doc.setFont("helvetica","normal"); doc.setFontSize(7.5); doc.setTextColor(120,120,120); doc.text(pdfTxt(`${o.money?"Paid = price each including a share of postage. Value = my own estimate, each. ":""}Mint = mint or privy mark. MyMint ${APP_VERSION}  ·  ${fmtDate(todayISO())}  ·  Page ${i} of ${pages}`),M,292,{maxWidth:IW}); }
+  const blob=doc.output("blob"), name=`mymint-checklist-${todayISO()}.pdf`, url=URL.createObjectURL(blob);
+  const canShare=!!(navigator.canShare&&navigator.canShare({files:[new File([blob],name,{type:"application/pdf"})]}));
+  S._repFile=new File([blob],name,{type:"application/pdf"});
+  if(out) out.innerHTML=`<a class="btn primary" href="${url}" download="${esc(name)}">Save PDF to phone</a><a class="btn" href="${url}" target="_blank" rel="noopener">Open PDF</a>${canShare?`<button type="button" class="btn" data-sharerep>Share…</button>`:""}<span class="muted small">${pages} page${pages===1?"":"s"} · ${(blob.size/1024).toFixed(0)} KB</span>`;
 }
 
-// ---------- events ----------
-document.addEventListener('click', (e) => {
-  const el = e.target.closest('[data-act]');
-  if (!el) return;
-  const fn = A[el.dataset.act];
-  if (!fn) return;
-  if (el.tagName === 'A') e.preventDefault();
-  if (el.type !== 'checkbox') e.preventDefault();
-  Promise.resolve(fn(el, e)).catch((err) => { console.error(err); toast(err.message || 'Something went wrong', 5000); });
+/* ================= cost: price + share of receipt postage ================= */
+const covOf=(c,rid)=>{ const q=qtyOf(c); const v=c.receiptCover&&c.receiptCover[rid]; return v?Math.min(q,Math.max(1,parseInt(v,10)||q)):q; };
+function rcUnits(r){ return rcCoins(r.id).reduce((a,c)=>a+covOf(c,r.id),0); }
+function postageTotal(c){ let t=0; for(const rid of (c.receiptIds||[])){ const r=S.receipts.find(x=>x.id===rid); if(!r||blank(r.postage)||!+r.postage) continue; const u=rcUnits(r); if(u) t+=+r.postage*covOf(c,rid)/u; } return t; }
+const postageEach=c=>postageTotal(c)/qtyOf(c);
+function costEach(c){ const p=priceAUD(c); if(p==null) return null; return Math.round((p+postageEach(c))*100)/100; }
+function gainPill(c){ const ce=costEach(c); if(ce==null||blank(c.value)||+c.value===ce) return ""; const up=+c.value>=ce; return ` <span class="grade" style="${up?"background:#DCFCE7;color:#166534":"background:#FEE2E2;color:#991B1B"}">${up?"+":"−"}${esc(aud(Math.abs(Math.round((+c.value-ce)*100)/100)))}</span>`; }
+function splitInfo(r){
+  const coins=rcCoins(r.id); if(blank(r.total)||!coins.length) return null;
+  const post=+r.postage||0, items=Math.round((+r.total-post)*100)/100, units=coins.reduce((a,c)=>a+covOf(c,r.id),0);
+  const unpriced=coins.filter(c=>blank(c.price)), priced=coins.filter(c=>!blank(c.price));
+  const known=Math.round(priced.reduce((a,c)=>a+(priceAUD(c)??+c.price)*covOf(c,r.id),0)*100)/100, uUnits=unpriced.reduce((a,c)=>a+covOf(c,r.id),0);
+  if(uUnits){ const each=Math.round((items-known)/uUnits*100)/100; return {mode:"fill",post,items,known,each,units:uUnits,targets:unpriced}; }
+  if(Math.abs(items-known)<0.011) return {mode:"match",post,items,known};
+  return {mode:"mismatch",post,items,known,even:Math.round(items/units*100)/100,units,targets:coins};
+}
+function splitHTML(r,d){ const s=splitInfo(r); if(!s) return "";
+  const lead=s.post?`Receipt ${esc(aud(r.total))} − postage ${esc(aud(s.post))} = <b>${esc(aud(s.items))}</b> for the coins.`:`Receipt ${esc(aud(r.total))} for the coins.`;
+  if(s.mode==="match") return `<div class="todo" style="background:#DCFCE7"><span>✓ <b>Matches the prices entered.</b> ${lead}</span></div>`;
+  if(s.mode==="fill"){ if(s.each<=0) return `<div class="todo"><span>${lead} The prices already entered add up to ${esc(aud(s.known))}, which leaves nothing for the coin${s.units===1?"":"s"} without a price — check the prices or the receipt total.</span></div>`;
+    return `<div class="todo" style="background:#DDF5F2"><span>${lead}${s.known?` Prices entered: ${esc(aud(s.known))}.`:""} That leaves <b>${esc(aud(s.each))} each</b> for ${s.units} coin${s.units===1?"":"s"} without a price.</span><button type="button" class="btn sm" data-rcsplit="${r.id}">Fill empty prices</button></div>`; }
+  return `<div class="todo"><span>${lead} The prices entered add up to ${esc(aud(s.known))}. An even split would be <b>${esc(aud(s.even))} each</b>.</span><button type="button" class="btn sm" data-rcsplit="${r.id}">${d.confirmSplit?"Tap again to replace":"Replace prices"}</button></div>`;
+}
+
+/* ================= built-in collector's guide ================= */
+const GUIDE=[
+ {id:"grades",title:"Grades at a glance",color:"#2563EB",icon:'<path d="M4 18h16M7 14l3-4 3 3 4-6"/>',html:`
+  <p>A grade describes <b>how much wear</b> a coin has. Australia mostly uses the word grades below; the Sheldon numbers (1–70) are the US scale used by grading services like PCGS and NGC, and many Australian dealers quote both.</p>
+  <table class="gt"><thead><tr><th>Grade</th><th>Sheldon</th><th>What you see</th></tr></thead><tbody>
+  <tr><td><b>G</b> Good</td><td>4–6</td><td>Heavily worn. Design mostly flat and seen in outline; rims mostly full; date readable.</td></tr>
+  <tr><td><b>VG</b> Very Good</td><td>8–10</td><td>Most central detail worn flat, but rims are full and the main design is clear.</td></tr>
+  <tr><td><b>F</b> Fine</td><td>12–15</td><td>About half the fine detail worn away; lettering still sharp.</td></tr>
+  <tr><td><b>VF</b> Very Fine</td><td>20–35</td><td>Light to moderate wear across the coin; all major features clear.</td></tr>
+  <tr><td><b>EF</b> Extremely Fine</td><td>40–45</td><td>All design visible; only the highest points show light wear. Some lustre may remain.</td></tr>
+  <tr><td><b>aUNC</b> About Unc.</td><td>50–58</td><td>Just a trace of wear or rub on the very highest points; most lustre still there.</td></tr>
+  <tr><td><b>UNC</b> Uncirculated</td><td>60–70</td><td>No wear at all. May still have bag marks or a weak strike — higher numbers mean fewer marks and better lustre.</td></tr>
+  <tr><td><b>BU</b> Brilliant Unc.</td><td>—</td><td>Uncirculated with full, original mint lustre. A description rather than a number.</td></tr>
+  </tbody></table>
+  <p class="muted small">"a" in front of a grade means "about" — e.g. aEF is almost Extremely Fine. "Choice" and "Gem" are used for the better uncirculated coins.</p>`},
+ {id:"howto",title:"How to grade a coin",color:"#0D9488",icon:'<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',html:`
+  <ol><li>Hold the coin by its edges under a <b>single light</b> and tilt it slowly. Wear shows as a dull patch where the lustre breaks.</li>
+  <li>Look at the <b>highest points</b> of the design first (cheek, hair, crown, animal's shoulder) — they wear before anything else.</li>
+  <li>Tell <b>wear</b> (flattened detail) apart from <b>damage</b> (scratches, dents, rim knocks, cleaning marks). Damage doesn't change the grade number, but note it — it lowers the value.</li>
+  <li>Grade <b>both sides</b> and use the lower one.</li>
+  <li>If you're unsure between two grades, choose the lower. You can add a Sheldon number later if you want more precision.</li></ol>
+  <p><b>Pre-decimal tip:</b> on George V pennies collectors judge wear by the King's crown band. "8 pearls, full centre diamond" is a common shorthand for EF.</p>
+  <p class="muted small">Proof isn't a grade — it's how the coin was made. Record it under Finish, and grade it as normal (most proofs are UNC).</p>`},
+ {id:"sheldon",title:"Sheldon numbers in detail",color:"#4338CA",icon:'<path d="M5 6h14M5 12h14M5 18h9"/>',html:`
+  <table class="gt"><tbody>
+  <tr><td>PO-1</td><td>Poor — type, date and mint mark just identifiable</td></tr><tr><td>FR-2</td><td>Fair — worn flat, traces of rim lettering</td></tr>
+  <tr><td>AG-3</td><td>About Good — rims worn into lettering</td></tr><tr><td>G-4 / G-6</td><td>Good — rims mostly full; design flat, seen in outline</td></tr>
+  <tr><td>VG-8 / 10</td><td>Very Good — most central detail worn flat, rims full</td></tr><tr><td>F-12 / 15</td><td>Fine — about half the detail worn; lettering sharp</td></tr>
+  <tr><td>VF-20 – 35</td><td>Very Fine — moderate to light wear; major detail clear</td></tr><tr><td>EF-40 / 45</td><td>Extremely Fine — high points flat or lightly worn; some lustre</td></tr>
+  <tr><td>AU-50 – 58</td><td>About Uncirculated — trace of wear; from some to nearly full lustre</td></tr>
+  <tr><td>MS-60 – 62</td><td>Mint State — no wear; weaker strike, many marks</td></tr><tr><td>MS-63 / 64</td><td>No wear; average strike, moderate to scattered marks</td></tr>
+  <tr><td>MS-65 / 66</td><td>Gem — above-average strike, only minor marks</td></tr><tr><td>MS-67 – 69</td><td>Superb — tiny flaws, barely visible</td></tr><tr><td>MS-70</td><td>Perfect — no marks visible</td></tr>
+  </tbody></table><p class="muted small">Proofs use the same numbers with PR or PF in front (e.g. PR-69). Source: PCGS grading standards.</p>`},
+ {id:"finish",title:"Finishes: circulating, UNC, proof",color:"#7C3AED",icon:'<circle cx="12" cy="12" r="8"/><path d="M8 12h8"/>',html:`
+  <dl class="gd"><dt>Circulating</dt><dd>Made for everyday change. Includes coloured "coin-in-card" circulating releases like the Indigenous Military Service $2.</dd>
+  <dt>Uncirculated (UNC)</dt><dd>Struck for collectors on normal dies and sold straight into a card, pack or set — never handled as change.</dd>
+  <dt>Frosted uncirculated</dt><dd>Uncirculated with a frosted (matte) design standing out against the background.</dd>
+  <dt>Proof</dt><dd>Struck more than once with specially polished dies and blanks, giving a mirror background and sharp frosted design. Handle only in its capsule.</dd>
+  <dt>Specimen</dt><dd>A finish between uncirculated and proof — better than normal UNC, but not mirror-like.</dd></dl>`},
+ {id:"marks",title:"Mint marks, privy marks & counterstamps",color:"#D97706",icon:'<path d="M12 3l2.5 5.5L20 9l-4 4 1 6-5-3-5 3 1-6-4-4 5.5-.5z"/>',html:`
+  <p><b>Decimal coins (Royal Australian Mint)</b> — each marked version is collected as a separate coin:</p>
+  <dl class="gd"><dt>Mintmark</dt><dd>A raised letter on the coin's background. Early ones were <b>C</b> (Canberra), <b>M</b> (Melbourne) and <b>S</b> (Sydney), struck at the Mint or on mobile presses at the Melbourne and Sydney Royal Easter Shows.</dd>
+  <dt>Counterstamp</dt><dd>A raised letter or symbol inside a <b>sunken circle</b> (e.g. B, M, S) — used from 2002, plus one-offs for special events.</dd>
+  <dt>Privy mark</dt><dd>A letter or symbol <b>sunk into a raised square</b>, e.g. [M], [S], [P] — used from 2008.</dd>
+  <dt>No mint mark</dt><dd>Most everyday circulating coins have none. Record "None" so it's clear you checked.</dd></dl>
+  <p><b>Pre-decimal coins</b> often show where they were struck:</p>
+  <dl class="gd"><dt>M</dt><dd>Melbourne (on silver coins from 1916).</dd><dt>D / S</dt><dd>Denver and San Francisco — wartime silver coins struck in the USA.</dd>
+  <dt>I</dt><dd>Bombay — below the King's head on wartime halfpennies.</dd><dt>PL</dt><dd>The 1951 "PL" penny, struck in London.</dd>
+  <dt>Dots</dt><dd>Small dots near the date, scroll or denomination identify Melbourne, Sydney, Perth or Bombay strikes on some pennies and halfpennies.</dd></dl>
+  <p class="muted small">Sources: Numista forum (brismike), NGC.</p>`},
+ {id:"packaging",title:"Packaging & storage words",color:"#DB2777",icon:'<path d="M4 8l8-4 8 4v10l-8 4-8-4z"/><path d="M4 8l8 4 8-4M12 12v10"/>',html:`
+  <dl class="gd"><dt>Card / coin-in-card</dt><dd>The coin sealed in a printed card. Keep it in the card — removing it usually lowers the value.</dd>
+  <dt>RAM card</dt><dd>A card issued by the Royal Australian Mint itself.</dd><dt>DCPL card</dt><dd>A card issued by Downies (Downies Collectables) rather than the Mint.</dd>
+  <dt>Set / folder</dt><dd>Several coins sold together, e.g. a 4-coin privy mark set or the 7-coin AC/DC set. Record it as one item with "This is a set" ticked.</dd>
+  <dt>Capsule</dt><dd>A clear round plastic case — best for proofs and valuable coins.</dd><dt>Flip</dt><dd>A folded plastic sleeve. Avoid old soft PVC flips — they can leave green residue over time.</dd>
+  <dt>2x2 holder</dt><dd>A cardboard square with a clear window, stapled shut.</dd><dt>Slab</dt><dd>A sealed hard-plastic holder from a grading service, with a label and certificate number.</dd>
+  <dt>Box / case</dt><dd>A presentation box or case, often with a certificate — e.g. boxed sets like the AC/DC collection.</dd><dt>Tin</dt><dd>A metal tin some mint sets come in.</dd><dt>Roll / tube</dt><dd>Mint rolls (wrapped coins) or plastic coin tubes.</dd>
+  <dt>PNC</dt><dd>Philatelic Numismatic Cover — an envelope with stamps and a coin. Choose <b>Other…</b> and type "PNC" — MyMint remembers it for next time.</dd></dl>`},
+ {id:"care",title:"Caring for your coins",color:"#15803D",icon:'<path d="M12 21s-7-4.4-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 10c0 5.6-7 10-7 10z"/>',html:`
+  <ul><li><b>Never clean a coin.</b> Even gentle polishing leaves hairline scratches and can halve its value.</li>
+  <li>Hold coins <b>by the edges</b>, over a soft surface. Skin oils leave fingerprints that can etch in.</li>
+  <li>Keep them <b>cool, dry and dark</b>. Damp causes spots; sunlight fades coloured coins and cards.</li>
+  <li>Use <b>archival, PVC-free</b> holders, capsules and albums.</li>
+  <li>Leave carded and boxed coins <b>in their original packaging</b>, with any certificate.</li>
+  <li>Record where each coin is kept (Storage location) — it makes insurance claims and finding coins much easier.</li></ul>`},
+ {id:"glossary",title:"Glossary",color:"#475569",icon:'<path d="M5 4h11l3 3v13H5z"/><path d="M9 10h6M9 14h6"/>',html:`
+  <dl class="gd"><dt>Obverse</dt><dd>The "heads" side — the monarch's portrait.</dd><dt>Reverse</dt><dd>The "tails" side — the design.</dd>
+  <dt>Effigy</dt><dd>The monarch's portrait, named by its designer (e.g. Jody Clark, 2019–2023).</dd><dt>Legend</dt><dd>The lettering around the coin.</dd>
+  <dt>Field</dt><dd>The flat background around the design.</dd><dt>Rim</dt><dd>The raised border.</dd>
+  <dt>Edge</dt><dd>The side of the coin — reeded (milled), plain or interrupted.</dd><dt>Mintage</dt><dd>How many were made. Lower mintage usually means scarcer.</dd>
+  <dt>NCLT</dt><dd>Non-circulating legal tender — made for collectors, not for change.</dd><dt>Noodling</dt><dd>Searching change, rolls or bags for keepers.</dd>
+  <dt>Lustre</dt><dd>The original "cartwheel" shine from striking. Once rubbed off, it never returns.</dd><dt>Toning</dt><dd>Natural colour that develops on metal over time.</dd>
+  <dt>Strike</dt><dd>How fully the design was pressed into the coin.</dd><dt>Variety</dt><dd>A recognised difference in a die (e.g. a doubled design).</dd>
+  <dt>Error</dt><dd>A minting mistake — off-centre, wrong planchet, mule (mismatched sides).</dd><dt>Key date</dt><dd>A scarce year that a series collection is hard to complete without.</dd></dl>`}
+];
+function guideBody(open){ return GUIDE.map(g=>`<details class="fsec gsec" id="g_${g.id}" ${open===g.id?"open":""}><summary><span class="ico" style="background:${g.color}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">${g.icon}</svg></span>${esc(g.title)}<span class="sp"></span></summary><div class="gtext">${g.html}</div></details>`).join(""); }
+function viewGuide(){ return `<section class="view">${backMore}<div class="hero" style="padding-top:12px;margin-top:0;border-radius:18px;margin-left:0;margin-right:0"><h1 style="color:#fff;font-size:22px">Collector's guide</h1><p class="m0" style="color:var(--on-indigo);font-size:13px">Grades, finishes, mint marks and coin care — always available, even offline.</p></div>${guideBody(S.guideOpen||"grades")}</section>`; }
+function guideHTML(d){ return `<div class="shead"><div class="wrap">${backBtn("Back")}<h2>Guide</h2></div></div><div class="wrap sbody">${guideBody(d.open)}</div>`; }
+const infoBtn=id=>`<button type="button" class="infob" data-guide="${id}" aria-label="What does this mean?">?</button>`;
+
+/* ================= Numista settings screen ================= */
+function viewNumista(){ const s=nsSet();
+  return `<section class="view">${backMore}<div class="panel"><h3>Numista lookups</h3>
+  <p class="m0">With a free Numista API key, adding a coin can fill in its specifications, designers, mintage and reference photos for you. The key is kept in this app and its backups only — never in the public GitHub files.</p>
+  <div class="field"><label for="nsKeyIn">Numista API key</label><input id="nsKeyIn" autocomplete="off" autocapitalize="off" spellcheck="false" value="${esc(s.key||"")}" placeholder="paste your key here"></div>
+  <label class="check-inline"><input type="checkbox" id="nsAusSet" ${s.ausOnly!==false?"checked":""}><span>Search Australian coins only by default</span></label>
+  <div class="row"><button type="button" class="btn primary" data-nssave>Save key</button><button type="button" class="btn" data-nstest ${s.key?"":"disabled"}>Test it</button><span class="muted small" id="nsStat">${s.key?esc(nsUsage()):""}</span></div></div>
+  <div class="panel"><h3>Getting a key (once, free)</h3><ol class="m0" style="padding-left:20px;display:flex;flex-direction:column;gap:6px">
+    <li>Sign in (or join free) at <b>en.numista.com</b>.</li><li>Open <b>en.numista.com/api</b> and choose the <b>Free plan</b> (2,000 lookups a month).</li><li>Copy the API key it shows, paste it above and tap <b>Save key</b>.</li></ol>
+    <p class="m0 muted small">Numista asks apps to show its N# numbers and say the data comes from Numista — MyMint does both.</p></div></section>`; }
+
+/* ================= events ================= */
+document.addEventListener("click",async e=>{
+  const z=e.target.closest("#zoom"); if(z){ z.remove(); return; }
+  const b=e.target.closest("button,a[data-dlbk],img[data-zoom]"); if(!b) return; const d=b.dataset;
+  if("zoom" in d){ const el=document.createElement("div"); el.id="zoom"; el.innerHTML=`<img src="${b.src}" alt=""><button type="button" class="btn">Close</button>`; document.body.appendChild(el); return; }
+  if("back" in d){ await popView(); return; }
+  if(d.guide){ e.preventDefault(); if(topV()&&topV().kind==="edit") readForm(); openView({kind:"guide",open:d.guide}); return; }
+  if(d.tab){ S.tab=d.tab; if(d.tab==="more") S.moreView=null; render(); scrollTo(0,0); return; }
+  if("add" in d){ if(S.readOnly){ toast(RO_MSG); return; } openView({kind:"add"}); return; }
+  if(d.open){ openView({kind:"detail",id:d.open}); return; }
+  if(d.mode){ view().mode=d.mode; saveMeta(); render(); return; }
+  if(d.size){ view().size=d.size; saveMeta(); render(); return; }
+  if(d.grp){ const g=S.f.grp; S.f.grp=g.includes(d.grp)?g.filter(x=>x!==d.grp):[...g,d.grp]; if(topV()&&topV().kind==="filters"){ b.setAttribute("aria-pressed",String(S.f.grp.includes(d.grp))); updFilterCount(); return; } render(); return; }
+  if(d.qf){ S.f[d.qf]=!S.f[d.qf]; render(); return; }
+  if(d.unf){ clearFilter(d.unf); render(); return; }
+  if("clearall" in d){ S.f=clone(FDEF); S.q=""; if(topV()&&topV().kind==="filters"){ drawTop(); return; } render(); return; }
+  if("clearq" in d){ S.q=""; render(); $("#q").focus(); return; }
+  if("filters" in d){ openView({kind:"filters"}); return; }
+  if("showtodo" in d){ S.f=clone(FDEF); S.f.todo=true; S.tab="coins"; render(); scrollTo(0,0); return; }
+  if(d.album){ openView({kind:"album",key:d.album}); return; }
+  if(d.tlist){ openView({kind:"tlist",id:d.tlist}); return; }
+  if(d.more!=null){ S.moreView=d.more||null; render(); scrollTo(0,0); if(d.more==="about") fillStoreInfo(); return; }
+  if(d.moreGo){ while(S.stack.length){ const x=S.stack.pop(); await cleanupView(x); } if($("#sheet").hidden===false){ S._ignorePop=true; history.back(); } $("#sheet").hidden=true; document.body.style.overflow=""; S.tab="more"; S.moreView=d.moreGo; render(); scrollTo(0,0); return; }
+  /* coin record */
+  if(d.sel!=null){ const t=topV(); t.sel=+d.sel; drawTop(); return; }
+  if(d.cover){ const c=clone(S.coins.find(x=>x.id===topV().id)); c.coverId=d.cover; c.updatedAt=new Date().toISOString(); await dbPut("coins",c); await reload(); topV().sel=0; drawTop(); toast("Cover photo set"); return; }
+  if(d.edit){ const c=S.coins.find(x=>x.id===d.edit); openView({kind:"edit",id:c.id,draft:clone(c),newFiles:[],removedFiles:[]}); return; }
+  if(d.addphoto){ const c=S.coins.find(x=>x.id===d.addphoto); openView({kind:"edit",id:c.id,draft:clone(c),newFiles:[],removedFiles:[]}); setTimeout(()=>{ const el=$("#phSec"); if(el) el.scrollIntoView({block:"start"}); },50); return; }
+  if(d.dup){ const c=clone(S.coins.find(x=>x.id===d.dup)); for(const k of ["id","addedAt","updatedAt","photos","coverId","serial","price","priceAud","priceRate","acqDate","source","value","valueDate","notes","status","qty","receiptIds"]) delete c[k]; c.photos=[]; c.qty=1; c.acqDate=todayISO(); c.status="In collection"; openView({kind:"edit",id:null,draft:c,newFiles:[],removedFiles:[]}); toast("Copied — change what's different and Save"); return; }
+  if(d.sold){ const c=clone(S.coins.find(x=>x.id===d.sold)); c.status=isOwned(c)?"Sold":"In collection"; c.updatedAt=new Date().toISOString(); await dbPut("coins",c); await reload(); drawTop(); toast(isOwned(c)?"Back in your collection":"Marked as sold"); return; }
+  if(d.delcoin){ const t=topV(); if(!t.confirmDel){ t.confirmDel=true; drawTop(); return; } await deleteCoin(d.delcoin); return; }
+  if(d.nsrefresh){ await nsRefresh(d.nsrefresh); return; }
+  /* add */
+  if("manual" in d){ replaceView({kind:"edit",id:null,draft:blankCoin(),newFiles:[],removedFiles:[]}); return; }
+  if("copyfrom" in d){ const t=topV(); t.copy=!t.copy; drawTop(); return; }
+  if(d.copy){ const c=clone(S.coins.find(x=>x.id===d.copy)); for(const k of ["id","addedAt","updatedAt","photos","coverId","serial","price","priceAud","priceRate","acqDate","source","value","valueDate","notes","status","qty","year","mintage","receiptIds"]) delete c[k]; c.photos=[]; c.qty=1; c.acqDate=todayISO(); c.status="In collection"; replaceView({kind:"edit",id:null,draft:c,newFiles:[],removedFiles:[]}); toast("Copied — fill in the year and what's different"); return; }
+  if(d.nspick){ await nsPick(topV(),d.nspick); return; }
+  if(d.issue!=null){ const t=topV(); const is=+d.issue<0?null:t.issues[+d.issue]; if(t.kind==="nsfind") await nsLink(t,is); else if(t.kind==="setfind") await siLink(t,is); else await nsBuild(t,is); return; }
+  if(d.nsfind!=null){ if(d.nsfind==="edit"){ readForm(); const tg=topV(); const v={kind:"nsfind",target:tg,q:nsQueryFor(tg.draft)}; openView(v); if(nsKey()) nsSearch(v); return; }
+    const c=S.coins.find(x=>x.id===d.nsfind); const ed={kind:"edit",id:c.id,draft:clone(c),newFiles:[],removedFiles:[]}; openView(ed); const v={kind:"nsfind",target:ed,q:nsQueryFor(ed.draft)}; openView(v); if(nsKey()) nsSearch(v); return; }
+  /* edit form */
+  if(d.pk){ const t=topV(); const c=t.draft; let v=d.pv; const on=b.getAttribute("aria-pressed")==="true";
+    if(d.pk==="status"&&on) return;
+    b.parentElement.querySelectorAll("button").forEach(x=>x.setAttribute("aria-pressed","false"));
+    if(on){ v=""; } else b.setAttribute("aria-pressed","true");
+    if(d.pk==="colourised") c.colourised=v==="yes"?true:v==="no"?false:null; else c[d.pk]=v;
+    if(d.pk==="packaging"){ const po=$("#f_packOther"); if(v===PACK_OTHER){ t.packOther=true; c.packaging=""; if(po){ po.hidden=false; po.focus(); } } else { t.packOther=false; if(po) po.hidden=true; } }
+    if(d.pk==="grade"){ const h=$("#gradeHint"); if(h) h.textContent=c.grade?GRADE_HINTS[c.grade]||"":"Not sure? Tap ? for what each grade looks like."; }
+    if(d.pk==="denom"){ const ti=$("#f_title"); if(ti){ readForm(); ti.placeholder=autoTitle(c)||"e.g. 2022 $2 Honey Bee"; } if(!c.collection){} }
+    return; }
+  if(d.qty){ const i=$("#f_qty"); i.value=Math.max(1,(parseInt(i.value,10)||1)+(+d.qty)); return; }
+  if("cam" in d){ $("#camIn").click(); return; }
+  if("pickph" in d){ $("#phIn").click(); return; }
+  if(d.whose){ readForm(); const [i,w]=d.whose.split(":"); const p=topV().draft.photos[+i]; p.mine=w==="mine"; if(!p.mine&&!p.source) p.source="Royal Australian Mint"; drawPhotos(); return; }
+  if(d.pcover!=null){ readForm(); const c=topV().draft; c.coverId=c.photos[+d.pcover].id; drawPhotos(); return; }
+  if(d.prm!=null){ readForm(); const t=topV(); const [p]=t.draft.photos.splice(+d.prm,1); if(!p.url){ if(t.newFiles.includes(p.id)){ t.newFiles=t.newFiles.filter(x=>x!==p.id); await dbDel("files",p.id); } else t.removedFiles.push(p.id); } if(t.draft.coverId===p.id) delete t.draft.coverId; drawPhotos(); return; }
+  if("save" in d){ b.disabled=true; try{ await saveCoin(); }catch(err){ toast("Couldn't save: "+(err&&err.message||err)); } b.disabled=false; return; }
+  if("nslink" in d){ const id=($("#f_nsid").value||"").trim(); if(!/^\d+$/.test(id)){ toast("Type the Numista number first"); return; } readForm(); const t=topV(); toast("Getting details from Numista…");
+    try{ const ty=await nsFetch(`/types/${id}`); let issues=[]; try{ issues=asList(await nsFetch(`/types/${id}/issues`)); }catch{} const c=t.draft; const issue=issues.find(i=>String(i.year)===String(yearNum(c))&&(i.mint_letter||"")===((c.mint&&c.mint!=="None")?c.mint:""))||null; applyNs(c,fromNumista(ty,issue),false); c.ns=nsInfo(ty,issues);
+      if(!(c.photos||[]).some(p=>!p.mine&&p.source==="Numista")) for(const [side,obj] of [["Obverse",ty.obverse],["Reverse",ty.reverse]]){ const pic=obj&&(obj.picture||obj.thumbnail); if(!pic) continue; const r=await nsImage(pic); if(!r) continue; if(!r.url) t.newFiles.push(r.id); c.photos.push({id:r.id,url:r.url,mine:false,side,source:"Numista",link:c.ns.url}); }
+      drawTop(); toast("Filled from Numista — your own entries were kept"); }catch(err){ toast(err.message||String(err)); } return; }
+  /* sets */
+  if("siadd" in d){ readForm(); const tg=topV(); const v={kind:"setfind",target:tg,q:tg.lastSetQ||nsQueryFor(tg.draft)}; openView(v); if(nsKey()) nsSearch(v); return; }
+  if("siman" in d){ readForm(); const t=topV(); t.siManual=!t.siManual; drawSet(); if(t.siManual){ const i=$("#si_title"); if(i) i.focus(); } return; }
+  if("siok" in d){ readForm(); const t=topV(); const title=($("#si_title").value||"").trim(); if(!title){ toast("Give the coin a name first"); return; }
+    const it={id:uid("si"),...pickKeys({title,year:($("#si_year").value||"").trim(),mint:($("#si_mint").value||"").trim(),denom:$("#si_denom").value},["title","year","mint","denom"]),photos:[]};
+    t.draft.setItems=[...(t.draft.setItems||[]),it]; t.siManual=false; drawSet(); toast(`Added — ${t.draft.setItems.length} coin${t.draft.setItems.length===1?"":"s"} in the set`); return; }
+  if(d.sirm!=null){ readForm(); const t=topV(); const [it]=t.draft.setItems.splice(+d.sirm,1); for(const p of ((it&&it.photos)||[])) if(!p.url&&t.newFiles.includes(p.id)){ t.newFiles=t.newFiles.filter(x=>x!==p.id); await dbDel("files",p.id); } drawSet(); return; }
+  /* receipts */
+  if("rcnew" in d){ readForm(); S._rcMode="edit"; $("#rcIn").click(); return; }
+  if("rcnewstd" in d){ S._rcMode="std"; $("#rcIn").click(); return; }
+  if("rcuse" in d){ readForm(); openView({kind:"rcpick",target:topV()}); return; }
+  if(d.rcpick){ const t=topV(); const tgt=t.target; tgt.draft.receiptIds=[...(tgt.draft.receiptIds||[]),d.rcpick]; await popView(); toast("Receipt linked — tap “Fill empty date & source” to copy its details"); return; }
+  if(d.rcun){ readForm(); const t=topV(); const c=t.draft; c.receiptIds=(c.receiptIds||[]).filter(x=>x!==d.rcun); const nr=(t.newReceipts||[]).find(x=>x.id===d.rcun);
+    if(nr){ t.newReceipts=t.newReceipts.filter(x=>x!==nr); if(nr.fromPhoto){ c.photos=[...(c.photos||[]),nr.fromPhoto]; } else if(t.newFiles.includes(nr.fileId)){ t.newFiles=t.newFiles.filter(x=>x!==nr.fileId); await dbDel("files",nr.fileId); } }
+    drawPhotos(); drawRc(); toast(nr&&nr.fromPhoto?"Moved back to photos":"Receipt unlinked from this coin"); return; }
+  if(d.rcview){ await viewReceiptFile(rcFind(d.rcview)); return; }
+  if("rcfill" in d){ readForm(); const t=topV(); const c=t.draft; const r=(c.receiptIds||[]).map(rcFind).find(x=>x&&(x.date||x.seller)); if(!r){ toast("Add the receipt's date or seller first"); return; } const n=fillFromReceipt(c,r,!t.id); drawTop(); toast(n?"Filled from the receipt":"Nothing to fill — those fields already have values"); return; }
+  if(d.ptorc!=null){ readForm(); const t=topV(); const c=t.draft; const [p]=c.photos.splice(+d.ptorc,1); if(!p) return; if(c.coverId===p.id) delete c.coverId; t.newReceipts=t.newReceipts||[]; const r={id:uid("rc"),fileId:p.id,type:"image/jpeg",name:"",addedAt:new Date().toISOString(),fromPhoto:p}; t.newReceipts.push(r); c.receiptIds=[...(c.receiptIds||[]),r.id]; drawPhotos(); drawRc(); toast("Moved to receipts — tap Save to keep it"); return; }
+  if(d.rcopen){ openView({kind:"receipt",id:d.rcopen}); return; }
+  if(d.rcfile){ await viewReceiptFile(S.receipts.find(r=>r.id===d.rcfile)); return; }
+  if(d.rcdl){ const r=S.receipts.find(x=>x.id===d.rcdl); if(r) await saveReceiptFile(r); return; }
+  if(d.rcsave){ const r={...S.receipts.find(x=>x.id===d.rcsave)}; const num=id=>{ const v=($(id).value||"").replace(/[$,\s]/g,""); return v===""||isNaN(+v)?null:+v; };
+    Object.assign(r,{date:$("#rv_date").value,seller:($("#rv_seller").value||"").trim(),orderNo:($("#rv_order").value||"").trim(),notes:($("#rv_notes").value||"").trim(),total:num("#rv_total"),postage:num("#rv_post"),updatedAt:new Date().toISOString()});
+    if(r.total!=null&&r.postage!=null&&r.postage>r.total){ toast("Postage can't be more than the receipt total"); return; }
+    for(const k of Object.keys(r)) if(r[k]===""||r[k]==null) delete r[k]; await dbPut("receipts",r); await reload(); drawTop(); toast("Receipt details saved"); return; }
+  if("rclink" in d){ const t=topV(); t.linking=true; t.sel=new Set(rcCoins(t.id).map(c=>c.id)); t.fill=true; t.lq=""; drawTop(); return; }
+  if("rclcancel" in d){ const t=topV(); t.linking=false; drawTop(); return; }
+  if("rclsave" in d){ const t=topV(); const r=S.receipts.find(x=>x.id===t.id); let added=0, removed=0;
+    for(const c0 of S.coins){ const has=(c0.receiptIds||[]).includes(r.id), want=t.sel.has(c0.id); if(has===want) continue; const c=clone(c0);
+      if(want){ c.receiptIds=[...(c.receiptIds||[]),r.id]; if(t.fill!==false) fillFromReceipt(c,r,false); added++; } else { c.receiptIds=(c.receiptIds||[]).filter(x=>x!==r.id); if(!c.receiptIds.length) delete c.receiptIds; if(c.receiptCover){ delete c.receiptCover[r.id]; if(!Object.keys(c.receiptCover).length) delete c.receiptCover; } removed++; }
+      c.updatedAt=new Date().toISOString(); await dbPut("coins",c); }
+    await reload(); t.linking=false; drawTop(); toast(added||removed?`Linked ${added}, unlinked ${removed}`:"No changes"); return; }
+  if(d.rcunc){ const t=topV(); const c=clone(S.coins.find(x=>x.id===d.rcunc)); c.receiptIds=(c.receiptIds||[]).filter(x=>x!==t.id); if(c.receiptCover){ delete c.receiptCover[t.id]; if(!Object.keys(c.receiptCover).length) delete c.receiptCover; } if(!c.receiptIds.length) delete c.receiptIds; c.updatedAt=new Date().toISOString(); await dbPut("coins",c); await reload(); drawTop(); toast("Unlinked from this receipt"); return; }
+  if(d.rcfillall){ const r=S.receipts.find(x=>x.id===d.rcfillall); let n=0; for(const c0 of rcCoins(r.id)){ const c=clone(c0); if(fillFromReceipt(c,r,false)){ c.updatedAt=new Date().toISOString(); await dbPut("coins",c); n++; } } await reload(); drawTop(); toast(n?`Filled ${n} coin${n===1?"":"s"}`:"Nothing to fill — those fields already have values"); return; }
+  if(d.rcsplit){ const t=topV(); const r=S.receipts.find(x=>x.id===d.rcsplit); const si=splitInfo(r); if(!si||si.mode==="match") return;
+    let each, targets;
+    if(si.mode==="fill"){ if(si.each<=0) return; each=si.each; targets=si.targets; } else { if(!t.confirmSplit){ t.confirmSplit=true; drawTop(); return; } each=si.even; targets=si.targets; }
+    for(const c0 of targets){ const c=clone(c0); c.price=each; c.priceCur="AUD"; delete c.priceAud; delete c.priceRate; if(blank(c.acqHow)) c.acqHow="Bought"; c.updatedAt=new Date().toISOString(); await dbPut("coins",c); }
+    t.confirmSplit=false; await reload(); drawTop(); toast(`${targets.length} price${targets.length===1?"":"s"} set to ${aud(each)} each`); return; }
+  if(d.rccov){ const t=topV(); const [cid,dl]=d.rccov.split("|"); const c=clone(S.coins.find(x=>x.id===cid)); const q=qtyOf(c); const n=Math.min(q,Math.max(1,covOf(c,t.id)+(+dl))); c.receiptCover={...(c.receiptCover||{})}; if(n===q) delete c.receiptCover[t.id]; else c.receiptCover[t.id]=n; if(!Object.keys(c.receiptCover).length) delete c.receiptCover; c.updatedAt=new Date().toISOString(); await dbPut("coins",c); await reload(); t.confirmSplit=false; drawTop(); return; }
+  if(d.rcdel){ const t=topV(); if(rcCoins(d.rcdel).length) return; if(!t.confirmDel){ t.confirmDel=true; drawTop(); return; } const r=S.receipts.find(x=>x.id===d.rcdel); await dbDel("receipts",r.id); await reload(); await dropUnused([r.fileId]); toast("Receipt deleted"); await popView(); return; }
+  if("shownophoto" in d){ S.f=clone(FDEF); S.f.photos="none"; if(S.rep&&S.rep.sold) S.f.status="all"; S.tab="coins"; render(); scrollTo(0,0); return; }
+  /* wants */
+  if(d.wgot){ const w=S.wanted.find(x=>x.id===d.wgot); const draft=blankCoin(); draft.denom=w.denom||""; draft.year=w.year||""; draft.series=w.series||""; draft.title=w.title||""; openView({kind:"edit",id:null,draft,newFiles:[],removedFiles:[],fromWant:w.id}); return; }
+  if(d.wdel){ await dbDel("wanted",d.wdel); await reload(); render(); toast("Removed from want list"); return; }
+  if(d.addwant!=null){ const had=S.stack.length; while(S.stack.length){ const x=S.stack.pop(); await cleanupView(x); } if(had){ S._ignorePop=true; history.back(); } $("#sheet").hidden=true; document.body.style.overflow=""; S.tab="wants"; render(); scrollTo(0,0); const det=document.querySelector("details.fsec"); if(det) det.open=true; const sr=$("#w_series"); if(sr){ sr.value=d.addwant; $("#w_title").focus(); } return; }
+  if(d.wantissue){ const [id,yr,mt]=d.wantissue.split("|"); const t=typeLists().find(x=>String(x.id)===id); const c0=t.units[0]; await dbPut("wanted",{id:uid("w"),title:`${yr} ${c0.denom||""} ${t.title}${mt?" ("+mt+")":""}`.replace(/\s+/g," ").trim(),denom:c0.denom||"",year:yr,series:c0.series||"",got:false,addedAt:new Date().toISOString()}); await reload(); toast("Added to your want list"); drawTop(); return; }
+  /* numista settings */
+  if("nssave" in d){ const s={...nsSet(),key:$("#nsKeyIn").value.trim(),ausOnly:$("#nsAusSet").checked}; await dbPut("settings",s); await reload(); render(); toast(s.key?"Numista key saved":"Numista key removed"); return; }
+  if("nstest" in d){ $("#nsStat").textContent="Testing…"; try{ const code=await nsAusCode(); const j=await nsFetch(`/types?q=${encodeURIComponent("2 dollars")}&category=coin&count=1${code?"&issuer="+encodeURIComponent(code):""}`); $("#nsStat").textContent=`Working ✓ — Numista found ${fmtNum(j.count||0)} ${code?"Australian ":""}matches for "2 dollars"${code?"":" (Australia filter not found — results are filtered in the app instead)"}. ${nsUsage()}`; }catch(err){ $("#nsStat").textContent=err.message||String(err); } return; }
+  /* more */
+  if("mkreport" in d){ S.rep.photos=$("#rPhotos").checked; S.rep.two=$("#rTwo").checked; S.rep.ref=$("#rRef").checked; S.rep.sold=$("#rSold").checked; S.rep.by=$("#rBy").value.trim(); b.disabled=true; try{ await makeReport(); }catch(err){ toast("Couldn't create the report: "+(err&&err.message||err)); } b.disabled=false; return; }
+  if("mkck" in d){ b.disabled=true; try{ await makeChecklist(); }catch(err){ toast("Couldn't create the checklist: "+(err&&err.message||err)); } b.disabled=false; return; }
+  if("sharerep" in d){ try{ await navigator.share({files:[S._repFile],title:"Coin collection report"}); }catch(err){ if(err&&err.name!=="AbortError") toast("Couldn't share: "+(err.message||err)); } return; }
+  if("copycsv" in d){ const ta=$("#csvText"); try{ await navigator.clipboard.writeText(ta.value); toast("CSV copied"); }catch{ ta.focus(); ta.select(); toast("Text selected — copy it from here"); } return; }
+  if("backup" in d){ b.disabled=true; try{ await makeBackup(); }catch(err){ toast("Backup failed: "+(err&&err.message||err)); } b.disabled=false; return; }
+  if("dlbk" in d){ setTimeout(markBackedUp,500); toast("Backup saved — check your Downloads"); return; }
+  if("dbxconnect" in d){ b.disabled=true; try{ await dbxConnect(); }catch(err){ toast("Couldn't start Dropbox sign-in: "+(err.message||err)); } b.disabled=false; return; }
+  if("dbxsync" in d){ await syncNow({manual:true}); return; }
+  if("dbxcheck" in d){ await syncNow({check:true}); const v=S.meta.verify; if(v&&!S.meta.dbx.lastError) toast(v.fixed?`Checked: fixed ${v.fixed} item${v.fixed===1?"":"s"} in Dropbox`:`Checked: ${v.coins} coins and ${v.files} photos all match ✓`); return; }
+  if("dbxsnap" in d){ b.disabled=true; try{ await maybeSnapshot(true); }catch(err){ toast("Snapshot failed: "+(err.message||err)); } b.disabled=false; return; }
+  if("dbxtake" in d){ if(!b.dataset.sure){ b.dataset.sure="1"; b.textContent="Tap again to download and take over"; return; } b.disabled=true; try{ await dbxTakeOver(); }catch(err){ toast("Couldn't take over: "+(err.message||err)); b.disabled=false; } return; }
+  if("dbxoff" in d){ if(!b.dataset.sure){ b.dataset.sure="1"; b.textContent="Tap again to disconnect"; return; } await dbxDisconnect(); return; }
+  if("dbxlist" in d){ await dbxListBackups(); return; }
+  if(d.dbxget){ b.disabled=true; b.textContent="Downloading…"; try{ const blob=await dbxDownload(d.dbxget); $("#dbxList").innerHTML=""; await readRestore(new File([blob],d.dbxget.split("/").pop(),{type:"application/zip"})); }catch(err){ toast("Download failed: "+(err.message||err)); b.disabled=false; b.textContent="Use this"; } return; }
+  if("restore" in d){ $("#restoreIn").click(); return; }
+  if("rsyes" in d){ b.disabled=true; try{ await doRestore(); }catch(err){ toast("Restore failed: "+(err&&err.message||err)); } return; }
+  if("rsno" in d){ _restore=null; $("#rsConfirm").innerHTML=""; return; }
 });
-document.addEventListener('submit', (e) => {
-  const form = e.target.closest('form[data-form]');
-  if (!form) return;
+let _qT=null;
+document.addEventListener("input",e=>{
+  const el=e.target;
+  if(el.id==="q"){ S.q=el.value; const cb=document.querySelector("[data-clearq]"); if(cb) cb.hidden=!S.q; clearTimeout(_qT); _qT=setTimeout(()=>{ const r=$("#results"); if(r){ r.innerHTML=resultsHTML(); hydrateImages(r); } },120); return; }
+  if(el.id==="nsq"){ topV().q=el.value; return; }
+  if(el.dataset.rnf){ const t=topV(); const r=((t&&t.newReceipts)||[]).find(x=>x.id===el.dataset.rid); if(r) r[el.dataset.rnf]=el.value; return; }
+  if(el.id==="rlq"){ const t=topV(); t.lq=el.value; const l=$("#rlList"); if(l){ l.innerHTML=linkRows(t,linkList(t)); hydrateImages(l); } return; }
+  if(el.id==="cpq"){ const t=topV(); t.cq=el.value; const l=$("#cpList"); if(l){ l.innerHTML=copyList(el.value); hydrateImages(l); } return; }
+  if(el.dataset.ff){ const k=el.dataset.ff; S.f[k]=el.value.trim(); updFilterCount(); return; }
+  if(el.dataset.plink!=null){ topV().draft.photos[+el.dataset.plink].link=el.value; return; }
+  if(["f_year","f_series"].includes(el.id)){ const c=readForm(); const ti=$("#f_title"); if(ti) ti.placeholder=autoTitle(c)||"e.g. 2022 $2 Honey Bee"; return; }
+  if(el.id==="f_price"){ const c=readForm(); delete c.priceAud; const n=$("#audNote"); if(n&&curOf(c.priceCur)!=="AUD") n.textContent="Converted to AUD when you save (needs internet)"; return; }
+});
+document.addEventListener("change",async e=>{
+  const el=e.target;
+  if(el.dataset.rck){ const t=topV(); if(el.checked) t.sel.add(el.dataset.rck); else t.sel.delete(el.dataset.rck); return; }
+  if(el.id==="rlFill"){ topV().fill=el.checked; return; }
+  if(el.dataset.rnf){ const t=topV(); const r=((t&&t.newReceipts)||[]).find(x=>x.id===el.dataset.rid); if(r) r[el.dataset.rnf]=el.value; return; }
+  if(el.dataset.ckd!=null){ const o=ckOpts(), k=el.dataset.ckd; o.off=o.off.filter(x=>x!==k); if(!el.checked) o.off.push(k); return; }
+  if(["ckSplit","ckWants","ckMoney","ckPhotos","ckSold"].includes(el.id)){ ckOpts()[{ckSplit:"split",ckWants:"wants",ckMoney:"money",ckPhotos:"photos",ckSold:"sold"}[el.id]]=el.checked; const sy=scrollY; render(); scrollTo(0,sy); return; }
+  if(["rPhotos","rTwo","rRef","rSold"].includes(el.id)){ S.rep[{rPhotos:"photos",rTwo:"two",rRef:"ref",rSold:"sold"}[el.id]]=el.checked; const by=$("#rBy"); if(by) S.rep.by=by.value.trim(); render(); return; }
+  if(el.id==="rcIn"&&el.files.length){ const fs=[...el.files]; el.value=""; if(S._rcMode==="edit") await addReceiptToEdit(fs); else await createStdReceipt(fs[0]); return; }
+  if(el.id==="dbxWifi"){ await setDbx({wifiOnly:el.checked}); refreshDbxPanel(); return; }
+  if(el.id==="sortSel"){ view().sort=el.value; saveMeta(); const r=$("#results"); r.innerHTML=resultsHTML(); hydrateImages(r); return; }
+  if(el.id==="groupSel"){ view().group=el.value; saveMeta(); const r=$("#results"); r.innerHTML=resultsHTML(); hydrateImages(r); return; }
+  if(el.dataset.ff){ const k=el.dataset.ff; if(k==="status") S.f.status=el.value||"owned"; else S.f[k]=el.value.trim(); updFilterCount(); return; }
+  if(el.dataset.ffc){ S.f[el.dataset.ffc]=el.checked; updFilterCount(); return; }
+  if(el.id==="f_isSet"){ $("#setFields").hidden=!el.checked; topV().draft.isSet=el.checked; return; }
+  if(el.id==="f_priceCur"){ const c=readForm(); delete c.priceAud; const n=$("#audNote"); if(n) n.textContent=curOf(c.priceCur)!=="AUD"?"Converted to AUD when you save (needs internet)":""; return; }
+  if(el.dataset.pside!=null){ readForm(); topV().draft.photos[+el.dataset.pside].side=el.value; return; }
+  if(el.dataset.psrc!=null){ readForm(); topV().draft.photos[+el.dataset.psrc].source=el.value; drawPhotos(); return; }
+  if(el.id==="nsAus"){ await dbPut("settings",{...nsSet(),ausOnly:el.checked}); await reload(); return; }
+  if((el.id==="camIn"||el.id==="phIn")&&el.files.length){ const fs=[...el.files]; el.value=""; await addPhotoFiles(fs); return; }
+  if(el.id==="restoreIn"&&el.files.length){ await readRestore(el.files[0]); el.value=""; return; }
+});
+document.addEventListener("submit",async e=>{
   e.preventDefault();
-  const fn = F[form.dataset.form];
-  if (fn) Promise.resolve(fn(form)).catch((err) => { console.error(err); toast(err.message || 'Something went wrong', 5000); });
+  if(e.target.id==="nsForm"){ const t=topV(); t.q=$("#nsq").value; $("#nsq").blur(); await nsSearch(t); return; }
+  if(e.target.id==="wantForm"){ const fd=new FormData(e.target); const title=(fd.get("title")||"").trim(); if(!title) return; const tg=String(fd.get("target")||"").replace(/[$,\s]/g,"");
+    await dbPut("wanted",{id:uid("w"),title,denom:fd.get("denom")||"",year:(fd.get("year")||"").trim(),series:(fd.get("series")||"").trim(),target:tg===""||isNaN(+tg)?null:+tg,notes:(fd.get("notes")||"").trim(),got:false,addedAt:new Date().toISOString()});
+    await reload(); render(); toast("Added to want list"); }
 });
-document.addEventListener('change', (e) => {
-  if (e.target.name === 'includeInTotals') e.target.dataset.inclAuto = '0';
-  const form = e.target.closest('form[data-form="bill"]');
-  if (form) {
-    if (e.target.name === 'payMethod') form.dataset.payTouched = '1';
-    // a new one-off bill is usually paid by hand
-    if (e.target.name === 'freq' && e.target.value === 'One-off' && !form.dataset.id && !form.dataset.payTouched) { const m = form.querySelector('input[name=payMethod][value=manual]'); if (m) m.checked = true; }
-    updateShows(form); saveDraft(form);
-  }
-  if (e.target.matches('[data-autosave]')) { const f = e.target.closest('form[data-form]'); F[f.dataset.form](f); }
-  if (e.target.matches('[data-rinv]')) A.rinv(e.target);
-  if (e.target.dataset.input === 'rFrom' || e.target.dataset.input === 'rTo') { S.ui[e.target.dataset.input] = e.target.value; render(); }
-});
-document.addEventListener('input', (e) => {
-  const bf = e.target.closest && e.target.closest('form[data-form="bill"]'); if (bf) saveDraft(bf);
-  if (e.target.dataset.input === 'q') { S.ui.q = e.target.value; render(); }
-  if (e.target.name === 'amount' && e.target.dataset.cur !== undefined) {
-    const p = document.getElementById('amtprev'); const cur = Number(e.target.dataset.cur), v = Number(e.target.value);
-    const af = document.getElementById('amtfrom'); if (af) af.hidden = e.target.value === '' || Number(e.target.value) === cur;
-    if (p && e.target.value !== '' && cur) p.textContent = (v >= cur ? 'Up ' : 'Down ') + C.money(Math.abs(v - cur)) + ' (' + (v >= cur ? '+' : '−') + Math.abs((v - cur) / cur * 100).toFixed(1) + '%) on ' + C.money(cur) + '.';
-  }
-});
-window.addEventListener('hashchange', onRoute);
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { if (!editing()) render(); queueSync(300); queueDbx(800); } });
-window.addEventListener('online', () => { queueSync(300); queueDbx(800); });
+document.addEventListener("keydown",e=>{ if(e.key==="Escape"){ const z=$("#zoom"); if(z){ z.remove(); return; } if(S.stack.length) popView(); } });
+window.addEventListener("unhandledrejection",e=>{ if(e.reason&&e.reason.message===RO_MSG){ e.preventDefault(); toast(RO_MSG); } });
 
-// ---------- start ----------
-async function start() {
-  S.dev = await St.loadDevice();
-  S.doc = await St.loadLocal();
-  const qp = new URLSearchParams(location.search);
-  if (qp.has('code') || qp.has('error')) { onRoute(); await dbxReturn(qp); }
-  if (S.doc) { const fixed = C.fixNewBillStarts(S.doc, tz()); if (fixed.length) { fixed.forEach((b) => { b.u = Date.now(); }); S.doc.updatedAt = Date.now(); S.doc.activity = S.doc.activity || []; S.doc.activity.unshift({ id: C.uid('ac'), at: Date.now(), u: Date.now(), by: S.dev.name || 'Me', text: 'Removed the made-up history before ' + fixed.map((b) => b.name + ' was added (' + C.fmtDate(b.startDate, { dow: false }) + ')').join(', ') }); await St.saveLocal(S.doc); } }
-  if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
-  if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('./sw.js', { scope: './' }).catch(() => {});
-  onRoute();
-  if (S.dev.github) { S.sync = 'off'; doSync(); setInterval(() => { if (document.visibilityState === 'visible') doSync(); }, 5 * 60 * 1000); }
-  if (DB.isOn(S.dev)) { queueDbx(1500); setInterval(() => { if (document.visibilityState === 'visible') doDbx(); }, 10 * 60 * 1000); }
-}
-start();
+/* ================= boot ================= */
+async function reload(){ [S.coins,S.wanted,S.settings,S.receipts]=await Promise.all(["coins","wanted","settings","receipts"].map(dbAll)); const m=await dbGet("meta","main"); S.meta=m?(({id,...r})=>r)(m):{}; view(); }
+let _converting=false;
+async function convertPending(){ if(S.readOnly||_converting||navigator.onLine===false) return; _converting=true; let n=0;
+  try{ for(const c of S.coins.filter(pendingConv)){ const x=clone(c); if(await convertCoin(x)){ await dbPut("coins",x); n++; } } }finally{ _converting=false; }
+  if(n){ await reload(); if(!S.stack.length) render(); toast(`${n} foreign-currency price${n===1?"":"s"} converted to AUD`); } }
+(async()=>{
+  try{ _dbP=openDB(); await _dbP; }catch(e){ $("#main").innerHTML=`<section class="view"><div class="empty">This browser can't store data for the app (private mode or storage blocked). Open it in normal Chrome.</div></section>`; return; }
+  await reload();
+  S.readOnly=!!S.meta.readOnly; if(!S.meta.deviceSince){ S.meta.deviceSince=todayStr(); await saveMeta(); } deviceId();
+  render();
+  await dbxFinish();
+  convertPending();
+  if(dbxOn()) scheduleSync(1500);
+  document.addEventListener("visibilitychange",()=>{ if(!dbxOn()) return; if(document.visibilityState==="hidden"){ if(S.meta.changes) syncNow(); } else scheduleSync(1500); });
+  window.addEventListener("pagehide",()=>{ if(dbxOn()&&S.meta.changes) syncNow(); });
+  window.addEventListener("online",()=>{ convertPending(); if(dbxOn()) scheduleSync(2000); });
+  if("serviceWorker" in navigator && location.protocol!=="file:"){ navigator.serviceWorker.register("sw.js").catch(()=>{}); }
+})();

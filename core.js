@@ -1,505 +1,381 @@
-// Bills app — core logic (no screen code). Used by the phone app, the
-// morning-alert job and the tests, so every figure comes from one place.
-// Dates are plain 'YYYY-MM-DD' strings and all date maths is done in UTC
-// so daylight saving never shifts a due date.
+/* MyMint — core: on-phone storage, money, Dropbox live copy, snapshots, backup & restore.
+   The storage and Dropbox parts follow the same design as MyMaglites. */
+"use strict";
+const APP_ID="mymint", APP_NAME="MyMint", APP_VERSION="1.14", BACKUP_VERSION=1;
 
-export const FREQS = ['Weekly', 'Fortnightly', 'Monthly', 'Quarterly', 'Annual', 'Every 5 yrs', 'One-off'];
-export const PER_YEAR = { Weekly: 52, Fortnightly: 26, Monthly: 12, Quarterly: 4, Annual: 1, 'Every 5 yrs': 0.2 };
-const DAY_STEP = { Weekly: 7, Fortnightly: 14 };
-const MONTH_STEP = { Monthly: 1, Quarterly: 3, Annual: 12, 'Every 5 yrs': 60 };
-export const LUMP = new Set(['Quarterly', 'Annual', 'Every 5 yrs', 'One-off']);
-const DAY = 86400000;
+/* ================= storage (IndexedDB, on this device) ================= */
+const STORES=["coins","wanted","settings","receipts","files","meta","outbox"];
+let _db, _dbP;
+function openRaw(v){ return new Promise((res,rej)=>{ const r=v?indexedDB.open(APP_ID,v):indexedDB.open(APP_ID);
+  r.onupgradeneeded=()=>{ const d=r.result; for(const s of STORES) if(!d.objectStoreNames.contains(s)) d.createObjectStore(s,{keyPath:"id"}); };
+  r.onblocked=()=>{ const m=document.getElementById("main"); if(m) m.innerHTML=`<section class="view"><div class="empty"><b>Finishing the update…</b><span>An older copy of MyMint is still open — usually the installed app in the background or a Chrome tab. Close it and this carries on by itself. Your data is safe.</span></div></section>`; };
+  r.onsuccess=()=>res(r.result); r.onerror=()=>rej(r.error); }); }
+async function openDB(){
+  let d=await openRaw();
+  if(STORES.some(s=>!d.objectStoreNames.contains(s))){ const v=d.version+1; d.close(); d=await openRaw(v); }
+  d.onversionchange=()=>{ d.close(); location.reload(); };
+  _db=d; return d;
+}
+function tx(store,mode,fn){ if(!_db) return (_dbP||Promise.reject(new Error("Storage isn't ready yet — close and reopen the app"))).then(()=>tx(store,mode,fn)); return new Promise((res,rej)=>{ const t=_db.transaction(store,mode); const os=t.objectStore(store); let out; const r=fn(os); if(r) r.onsuccess=()=>{out=r.result}; t.oncomplete=()=>res(out); t.onerror=()=>rej(t.error); t.onabort=()=>rej(t.error); }); }
+const dbAll=s=>tx(s,"readonly",os=>os.getAll());
+const dbGet=(s,id)=>tx(s,"readonly",os=>os.get(id));
+let _bulk=0; // >0 while restoring, so those writes don't count as your changes
+const _user=s=>s!=="meta"&&s!=="outbox"&&!_bulk;
+const _w=(s,op,key)=>r=>{ if(_user(s)) noteChange(s,op,key); return r; };
+const _ro=s=>_user(s)&&S.readOnly?Promise.reject(new Error(RO_MSG)):null;
+const dbPut=(s,o)=>_ro(s)||tx(s,"readwrite",os=>os.put(o)).then(_w(s,"put",o.id));
+const dbDel=(s,id)=>_ro(s)||tx(s,"readwrite",os=>os.delete(id)).then(_w(s,"del",id));
+const dbClear=s=>_ro(s)||tx(s,"readwrite",os=>os.clear()).then(_w(s,"clear",null));
+const saveMeta=()=>tx("meta","readwrite",os=>os.put({id:"main",...S.meta}));
+const uid=p=>(p||"x")+"-"+Date.now().toString(36)+Math.random().toString(36).slice(2,7);
 
-// ---------- dates ----------
-const pad = (n) => String(n).padStart(2, '0');
-export function isISO(s) { return typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s) && !isNaN(parseISO(s)); }
-export function parseISO(s) { const [y, m, d] = s.split('-').map(Number); return Date.UTC(y, m - 1, d); }
-export function toISO(t) { const d = new Date(t); return d.getUTCFullYear() + '-' + pad(d.getUTCMonth() + 1) + '-' + pad(d.getUTCDate()); }
-export function addDays(iso, n) { return toISO(parseISO(iso) + n * DAY); }
-export function daysBetween(a, b) { return Math.round((parseISO(b) - parseISO(a)) / DAY); } // b − a
-export function dow(iso) { return new Date(parseISO(iso)).getUTCDay(); }
-export function daysInMonth(y, m0) { return new Date(Date.UTC(y, m0 + 1, 0)).getUTCDate(); }
-// Add months to the ORIGINAL date, clamping to month end (31 Aug + 3 → 30 Nov,
-// + 6 → 28/29 Feb, + 9 → 31 May). Never chained, so dates never drift.
-export function addMonths(iso, n) {
-  const [y, m, d] = iso.split('-').map(Number);
-  const total = (y * 12 + (m - 1)) + n;
-  const ny = Math.floor(total / 12), nm = total - ny * 12;
-  return ny + '-' + pad(nm + 1) + '-' + pad(Math.min(d, daysInMonth(ny, nm)));
-}
-export function todayISO(now = new Date(), tz = 'Australia/Sydney') {
-  return new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
-}
-export function hourIn(now = new Date(), tz = 'Australia/Sydney') {
-  return Number(new Intl.DateTimeFormat('en-GB', { timeZone: tz, hour: '2-digit', hour12: false }).format(now)) % 24;
-}
-const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-const DOW_LONG = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-const MON_LONG = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
-export function fmtDate(iso, opts = {}) {
-  if (!isISO(iso)) return '—';
-  const [y, m, d] = iso.split('-').map(Number);
-  let s = (opts.dow === false ? '' : DOW[dow(iso)] + ' ') + d + ' ' + MON[m - 1];
-  if (opts.year || (opts.today && y !== Number(opts.today.slice(0, 4)))) s += ' ' + y;
-  return s;
-}
-export function fmtLong(iso) { const [y, m, d] = iso.split('-').map(Number); return DOW_LONG[dow(iso)] + ' ' + d + ' ' + MON_LONG[m - 1] + ' ' + y; }
-export function monthName(m0, long = true) { return long ? MON_LONG[m0] : MON[m0]; }
-export function dowName(i, long = false) { return long ? DOW_LONG[i] : DOW[i]; }
-export function relDays(n) {
-  if (n === 0) return 'Today';
-  if (n === 1) return 'Tomorrow';
-  if (n === -1) return 'Yesterday';
-  if (n < 0) return Math.abs(n) + ' days ago';
-  return 'In ' + n + ' days';
-}
-export function isWeekend(iso) { const w = dow(iso); return w === 0 || w === 6; }
-export function nextWeekday(iso) { let d = iso; while (isWeekend(d)) d = addDays(d, 1); return d; }
+/* ================= small helpers ================= */
+const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const $=s=>document.querySelector(s);
+const clone=o=>JSON.parse(JSON.stringify(o));
+const blank=v=>v==null||v==="";
+function toast(m){ const t=$("#toast"); t.textContent=m; t.hidden=false; clearTimeout(toast._t); toast._t=setTimeout(()=>t.hidden=true,2800); }
+const MON=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+function fmtDate(d){ if(!d) return ""; const [y,m,dd]=String(d).split("-"); return dd?`${+dd} ${MON[+m-1]} ${y}`:d; }
+const todayISO=()=>{ const d=new Date(); return new Date(d-d.getTimezoneOffset()*6e4).toISOString().slice(0,10); };
+function stamp(){ const d=new Date(),z=n=>String(n).padStart(2,"0"); return `${d.getFullYear()}-${z(d.getMonth()+1)}-${z(d.getDate())}_${z(d.getHours())}${z(d.getMinutes())}${z(d.getSeconds())}`; }
+function todayStr(){ return todayISO(); }
+function fmtWhen(iso){ if(!iso) return "—"; const d=new Date(iso); if(isNaN(d)) return "—"; const z=n=>String(n).padStart(2,"0"); const today=new Date().toDateString()===d.toDateString(); const t=d.toLocaleTimeString([], {hour:"numeric",minute:"2-digit"}); return today?`today ${t}`:`${fmtDate(`${d.getFullYear()}-${z(d.getMonth()+1)}-${z(d.getDate())}`)} ${t}`; }
+function devWord(){ return /Android|iPhone/i.test(navigator.userAgent)?"phone":"device"; }
 
-// ---------- money ----------
-export function money(n, dp = 2) {
-  if (n === null || n === undefined || isNaN(n)) return '—';
-  const neg = n < 0 ? '−' : '';
-  return neg + '$' + Math.abs(n).toLocaleString('en-AU', { minimumFractionDigits: dp, maximumFractionDigits: dp });
+/* ================= money: original currency + AUD equivalent ================= */
+const CURRENCIES=["AUD","USD","GBP","EUR","NZD","CAD","JPY"];
+const CUR_SYM={AUD:"A$",USD:"US$",GBP:"£",EUR:"€",NZD:"NZ$",CAD:"C$",JPY:"¥"};
+const curOf=c=>c||"AUD";
+function fmtMoney(n,cur){ if(blank(n)) return ""; cur=curOf(cur); const v=Number(n); const dp=cur==="JPY"?0:(Math.round(v*100)%100?2:0); return (CUR_SYM[cur]||cur+" ")+v.toLocaleString("en-AU",{minimumFractionDigits:dp,maximumFractionDigits:dp}); }
+const aud=n=>blank(n)?"":"$"+Number(n).toLocaleString("en-AU",{minimumFractionDigits:Math.round(n*100)%100?2:0,maximumFractionDigits:2});
+function priceAUD(c){ if(blank(c.price)) return null; if(curOf(c.priceCur)==="AUD") return +c.price; return blank(c.priceAud)?null:+c.priceAud; }
+const pendingConv=c=>!blank(c.price)&&+c.price!==0&&curOf(c.priceCur)!=="AUD"&&blank(c.priceAud);
+const _rates={};
+/* Daily reference rates from the European Central Bank, via the free Frankfurter service (no key, no account). */
+async function getRate(cur,date){
+  cur=curOf(cur); if(cur==="AUD") return {rate:1,date};
+  const d=(date&&/^\d{4}-\d{2}-\d{2}$/.test(date)&&date<=todayISO())?date:"latest"; const key=cur+"|"+d; if(_rates[key]) return _rates[key];
+  const tries=[
+    async()=>{ const r=await fetch(`https://api.frankfurter.dev/v1/${d}?base=${cur}&symbols=AUD`); if(!r.ok) throw 0; const j=await r.json(); return {rate:j.rates&&j.rates.AUD,date:j.date}; },
+    async()=>{ const r=await fetch(`https://api.frankfurter.app/${d}?from=${cur}&to=AUD`); if(!r.ok) throw 0; const j=await r.json(); return {rate:j.rates&&j.rates.AUD,date:j.date}; }
+  ];
+  for(const f of tries){ try{ const x=await f(); if(x&&+x.rate>0){ x.rate=+x.rate; _rates[key]=x; return x; } }catch{} }
+  return null;
 }
-export const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
+async function convertCoin(c){ if(!pendingConv(c)) return false; const r=await getRate(c.priceCur,c.acqDate); if(!r) return false; c.priceAud=Math.round(+c.price*r.rate*100)/100; c.priceRate={rate:r.rate,date:r.date}; return true; }
 
-// ---------- ids / stamps ----------
-export function uid(prefix = 'x') { return prefix + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
+/* ================= file blobs → object URLs ================= */
+async function urlFor(id){ if(!id) return ""; if(S.urls[id]) return S.urls[id]; const f=await dbGet("files",id); if(!f) return ""; S.urls[id]=URL.createObjectURL(f.blob); return S.urls[id]; }
+async function hydrateImages(root){ const imgs=(root||document).querySelectorAll("img[data-fid]"); for(const im of imgs){ const u=await urlFor(im.dataset.fid); if(u) im.src=u; } }
+async function resizeImage(blob,max){ const bmp=await createImageBitmap(blob); const s=Math.min(1,(max||1600)/Math.max(bmp.width,bmp.height)); const c=document.createElement("canvas"); c.width=Math.round(bmp.width*s); c.height=Math.round(bmp.height*s); c.getContext("2d").drawImage(bmp,0,0,c.width,c.height); return await new Promise(r=>c.toBlob(r,"image/jpeg",0.84)); }
+async function askPersist(){ try{ if(navigator.storage&&navigator.storage.persist&&!(await navigator.storage.persisted())) await navigator.storage.persist(); }catch{} }
 
-// ---------- recurrence ----------
-// All due dates of a bill between from and to (inclusive), always counted
-// from the bill's reference date.
-export function occurrences(bill, from, to) {
-  if (!bill || !isISO(bill.refDate) || !FREQS.includes(bill.freq)) return [];
-  if (bill.status === 'pending' || bill.del) return [];
-  const out = [];
-  const ref = bill.refDate;
-  let end = to;
-  if (isISO(bill.endDate) && bill.endDate < end) end = bill.endDate;
-  if (bill.status === 'stopped' && isISO(bill.stoppedAt) && bill.stoppedAt < end) end = bill.stoppedAt;
-  let start = from;
-  if (isISO(bill.startDate) && bill.startDate > start) start = bill.startDate;
-  // A 5-yearly date (e.g. a licence expiry) is the next one — don't project backwards.
-  if (bill.freq === 'Every 5 yrs' && ref > start) start = ref;
-  if (end < start) return out;
-  if (bill.freq === 'One-off') { if (ref >= start && ref <= end) out.push(ref); return out; } // a single date, never repeated
-  if (DAY_STEP[bill.freq]) {
-    const n = DAY_STEP[bill.freq];
-    const k = Math.ceil(daysBetween(ref, start) / n);
-    for (let d = addDays(ref, k * n); d <= end; d = addDays(d, n)) if (d >= start) out.push(d);
-  } else {
-    const m = MONTH_STEP[bill.freq];
-    const [ry, rm] = ref.split('-').map(Number);
-    const [sy, sm] = start.split('-').map(Number);
-    let k = Math.floor(((sy - ry) * 12 + (sm - rm)) / m) - 1;
-    for (let guard = 0; guard < 2000; guard++, k++) {
-      const d = addMonths(ref, k * m);
-      if (d > end) break;
-      if (d >= start) out.push(d);
+/* ================= backup file ================= */
+function backupName(kind){ return `mymint-${kind||"backup"}-${stamp()}.zip`; }
+function fileExt(f){ return (f.type==="image/jpeg"?"jpg":f.type==="application/pdf"?"pdf":f.type==="image/png"?"png":f.type==="image/webp"?"webp":(String(f.name||"").split(".").pop()||"bin")).toLowerCase().replace(/[^a-z0-9]/g,"")||"bin"; }
+async function buildBackup(kind){
+  const zip=new JSZip(); const files=await dbAll("files"); const manifest=[];
+  for(const f of files){ const path=`files/${f.id}.${fileExt(f)}`; zip.file(path,f.blob); manifest.push({id:f.id,type:f.type,name:f.name,path}); }
+  const data={app:APP_ID,version:BACKUP_VERSION,appVersion:APP_VERSION,exportedAt:new Date().toISOString(),counts:{coins:S.coins.length,files:files.length,receipts:(S.receipts||[]).length},coins:S.coins,wanted:S.wanted,settings:S.settings,receipts:S.receipts||[],files:manifest};
+  zip.file("backup.json",JSON.stringify(data,null,1));
+  const blob=await zip.generateAsync({type:"blob",compression:"STORE"});
+  return {blob,name:backupName(kind),nFiles:files.length};
+}
+async function makeBackup(){
+  const st=$("#bkStat"); st.textContent="Packing…";
+  const {blob,name,nFiles}=await buildBackup(); const url=URL.createObjectURL(blob);
+  $("#bkOut").innerHTML=`<a class="btn primary" href="${url}" download="${esc(name)}" data-dlbk>Save to phone</a><span class="muted small">${(blob.size/1048576).toFixed(1)} MB · ${S.coins.length} coins · ${nFiles} photos</span>`;
+  st.textContent="";
+}
+async function markBackedUp(){ S.meta.lastBackup=new Date().toISOString(); S.meta.changes=0; await saveMeta(); hdrStatus(); }
+let _restore=null;
+async function readRestore(file){
+  const st=$("#rsStat")||{}; st.textContent="Reading…";
+  try{
+    let zip=null, data;
+    const head=new Uint8Array(await file.slice(0,4).arrayBuffer());
+    if(head[0]===0x50&&head[1]===0x4b){ zip=await JSZip.loadAsync(file); const j=zip.file("backup.json"); if(!j) throw new Error("This isn't a MyMint backup (no backup.json inside)."); data=JSON.parse(await j.async("string")); }
+    else { const txt=(await file.text()).replace(/^\ufeff/,"").trim(); if(!txt.startsWith("{")) throw new Error(file.size?"That file isn't a MyMint backup (it may not have downloaded fully — try saving it again).":"That file is empty — it didn't download fully. Save it again and retry."); data=JSON.parse(txt); }
+    if(data.app!==APP_ID) throw new Error("This file is from a different app.");
+    _restore={zip,data};
+    const html=`<div class="banner" style="margin-top:8px"><span>Backup from ${fmtWhen(data.exportedAt)}: ${data.coins.length} coins, ${(data.files||[]).length} photos and files, ${(data.receipts||[]).length} receipts, ${(data.wanted||[]).length} wanted. This replaces what's on this ${devWord()}${S.coins.length?` (${S.coins.length} coins)`:""}.</span><button type="button" class="btn primary sm" data-rsyes>Restore</button><button type="button" class="btn ghost sm" data-rsno>Cancel</button></div>`;
+    if($("#rsConfirm")){ $("#rsConfirm").innerHTML=html; st.textContent=""; }
+    else { S.tab="more"; S.moreView="backup"; render(); $("#rsConfirm").innerHTML=html; }
+  }catch(e){ if($("#rsStat")) $("#rsStat").textContent=""; toast(e.message||"That file couldn't be read."); }
+}
+async function doRestore(){
+  const {zip,data}=_restore; const st=$("#rsStat");
+  if(S.readOnly){ toast(RO_MSG); return; }
+  if(dbxOn()&&S.coins.length){ st.textContent="Saving a snapshot of what's here first…"; try{ await uploadSnapshot("before-restore"); }catch(e){ st.textContent=""; toast("Couldn't save a snapshot to Dropbox first ("+(e.message||e)+"). Make a backup file, then try again."); return; } }
+  st.textContent="Restoring…"; _bulk++; try{
+  for(const s of ["coins","wanted","settings","receipts","files"]) await dbClear(s);
+  for(const u of Object.values(S.urls)) URL.revokeObjectURL(u); S.urls={};
+  let n=0; for(const f of (zip?data.files||[]:[])){ const z=zip.file(f.path); if(!z) continue; const b=await z.async("blob"); await dbPut("files",{id:f.id,type:f.type,name:f.name,blob:new Blob([b],{type:f.type})}); if(++n%10===0) st.textContent=`Restoring photos ${n} of ${data.files.length}…`; }
+  for(const c of data.coins) await dbPut("coins",c); for(const w of (data.wanted||[])) await dbPut("wanted",w); for(const x of (data.settings||[])) await dbPut("settings",x); for(const x of (data.receipts||[])) await dbPut("receipts",x);
+  S.meta.lastBackup=data.exportedAt; S.meta.changes=0; S.meta.needFull=true; S.meta.snapDirty=true; await tx("outbox","readwrite",os=>os.clear()); await saveMeta();
+  _restore=null; await reload(); }finally{ _bulk--; } askPersist(); S.tab="coins"; render(); toast(`Restored ${data.coins.length} coins`); if(dbxOn()) syncNow();
+}
+
+/* ---------- Dropbox: live copy, upload queue, snapshots, main-device handover ----------
+   Dropbox app folder layout:
+     live/manifest.json   who the main device is, revision, counts
+     live/coins/<id>.json, live/files/<id>.<ext>, live/files.json (photo index), live/wanted.json, live/settings.json
+     snapshots/*.zip      daily full backups (and one before every restore)
+     deleted/…            anything deleted or replaced on the phone, moved here instead of erased      */
+const DBX_APP_KEY="o386ym9hmi3jn7t"; // Dropbox App key for the MyMint app folder (not a secret; the App secret is never used)
+const PROMPT_EVERY=10, SYNC_DELAY=3000, VERIFY_DAYS=7, SNAP_DAILY_DAYS=30, SNAP_MONTHS=24;
+const DBX_TOKEN="https://api.dropboxapi.com/oauth2/token";
+const RO_MSG="This device has been replaced as the main one — view only. Use More › Backup & restore to make it the main device again.";
+let _syncT=null, _syncing=false, _syncAgain=false;
+const LIST_STORES=["wanted","settings","receipts"];
+function noteChange(s,op,key){
+  S.meta.changes=(S.meta.changes||0)+1; S.meta.snapDirty=true;
+  const k=s==="coins"?"t:"+key:s==="files"?"f:"+key:LIST_STORES.includes(s)?"l:"+s:null;
+  if(op==="clear") S.meta.needFull=true;
+  else if(k) tx("outbox","readwrite",os=>os.put({id:k,op:k[0]==="l"?"put":op,at:Date.now()+Math.random()})).catch(()=>{});
+  saveMeta().catch(()=>{});
+  if(dbxOn()) scheduleSync(); hdrStatus();
+  if(!dbxOn()&&S.meta.changes%PROMPT_EVERY===0) setTimeout(()=>toast(`${S.meta.changes} changes not backed up — More › Backup & restore`),3000);
+}
+function hdrStatus(){ const el=$("#hdrsub"); if(!el) return; const ch=S.meta.changes||0;
+  const st=S.readOnly?"view only":_syncing?"syncing…":ch?(dbxOn()?`${ch} change${ch===1?"":"s"} waiting`:`${ch} change${ch===1?"":"s"} not backed up`):dbxOn()?"in Dropbox ✓":S.meta.lastBackup?"backed up ✓":"not backed up";
+  const n=S.coins.filter(isOwned).reduce((a,c)=>a+(typeof coinsIn==="function"?coinsIn(c):(+c.qty||1)),0);
+  el.textContent=`${n} coin${n===1?"":"s"} · ${st}`; el.classList.toggle("warnTxt",S.readOnly||(!_syncing&&(ch>0||(!dbxOn()&&!S.meta.lastBackup))&&S.coins.length>0)); }
+function dbxOn(){ return !!(S.meta.dbx&&S.meta.dbx.refresh); }
+function appKey(){ return DBX_APP_KEY||(S.meta.dbx||{}).appKey||""; }
+function onCellular(){ const c=navigator.connection; return !!(c&&c.type==="cellular"); }
+function dbxRedirect(){ return new URL("./",location.href).href.split(/[?#]/)[0]; }
+function setDbx(patch){ S.meta.dbx={...(S.meta.dbx||{}),...patch}; return saveMeta(); }
+function deviceId(){ if(!S.meta.deviceId){ S.meta.deviceId=uid("dev"); saveMeta().catch(()=>{}); } return S.meta.deviceId; }
+function deviceName(){ const u=navigator.userAgent; return (/Android/.test(u)?"Android phone":/iPhone|iPad/.test(u)?"iPhone/iPad":/Windows/.test(u)?"Windows PC":/Mac/.test(u)?"Mac":/Linux/.test(u)?"Linux PC":"Device")+` (set up ${fmtDate(S.meta.deviceSince||todayStr())})`; }
+function scheduleSync(ms){ clearTimeout(_syncT); _syncT=setTimeout(()=>syncNow(),ms??SYNC_DELAY); }
+const b64url=u8=>btoa(String.fromCharCode(...u8)).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
+const hex=buf=>[...new Uint8Array(buf)].map(b=>b.toString(16).padStart(2,"0")).join("");
+async function dbxHash(data){ // Dropbox content_hash: SHA-256 of the concatenated SHA-256s of each 4 MB block
+  const buf=data instanceof Blob?await data.arrayBuffer():new TextEncoder().encode(data).buffer; const parts=[];
+  for(let i=0;i<buf.byteLength||i===0;i+=4194304){ parts.push(new Uint8Array(await crypto.subtle.digest("SHA-256",buf.slice(i,i+4194304)))); if(!buf.byteLength) break; }
+  const all=new Uint8Array(parts.length*32); parts.forEach((p,i)=>all.set(p,i*32)); return hex(await crypto.subtle.digest("SHA-256",all));
+}
+/* sign-in (OAuth with PKCE; no password or secret is ever stored) */
+async function dbxConnect(){
+  const key=DBX_APP_KEY||(($("#dbxKey")||{}).value||"").trim(); if(!/^[a-z0-9]{8,}$/i.test(key)){ S.tab="more"; S.moreView="backup"; render(); toast("Paste the App key from the Dropbox App Console first"); return; }
+  if(!(window.crypto&&crypto.subtle)){ toast("This browser can't do the secure sign-in — open the app from its https address"); return; }
+  const v=b64url(crypto.getRandomValues(new Uint8Array(48)));
+  const challenge=b64url(new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(v))));
+  const state=b64url(crypto.getRandomValues(new Uint8Array(16)));
+  await setDbx({appKey:key,pkce:{v,state},lastError:null});
+  const q=new URLSearchParams({client_id:key,response_type:"code",code_challenge:challenge,code_challenge_method:"S256",token_access_type:"offline",redirect_uri:dbxRedirect(),state});
+  location.href="https://www.dropbox.com/oauth2/authorize?"+q.toString();
+}
+async function dbxFinish(){
+  const p=new URLSearchParams(location.search); if(!p.has("code")&&!p.has("error")) return;
+  history.replaceState(null,"",location.pathname);
+  const dx=S.meta.dbx||{}; S.tab="more"; S.moreView="backup";
+  if(p.has("error")){ render(); toast("Dropbox not connected: "+(p.get("error_description")||p.get("error")).replace(/\+/g," ")); return; }
+  if(!dx.pkce||p.get("state")!==dx.pkce.state){ render(); toast("That Dropbox sign-in didn't match — tap Connect Dropbox again"); return; }
+  try{
+    let r,j;
+    for(let i=0;i<4;i++){ // Dropbox sometimes says "rate limited" while it sets up a new app folder: wait and try again
+      r=await fetch(DBX_TOKEN,{method:"POST",body:new URLSearchParams({grant_type:"authorization_code",code:p.get("code"),client_id:dx.appKey,code_verifier:dx.pkce.v,redirect_uri:dbxRedirect()})});
+      j=await r.json().catch(()=>({}));
+      if(r.ok&&j.refresh_token) break;
+      const busy=r.status===429||r.status>=500||/rate.?limit|too_many|concurrency/i.test(String(j.error_description||j.error||""));
+      if(!busy||i===3) break;
+      toast("Dropbox is busy setting up your folder — retrying…"); await new Promise(z=>setTimeout(z,(i+1)*4000));
     }
+    if(!r.ok||!j.refresh_token) throw new Error(shortErr(j.error_description||j.error||("HTTP "+r.status)));
+    S.meta.dbx={appKey:dx.appKey,refresh:j.refresh_token,access:j.access_token,expires:Date.now()+(j.expires_in||14400)*1000,wifiOnly:dx.wifiOnly!==false};
+    await saveMeta();
+    try{ const a=await dbxApi("users/get_current_account",null); await setDbx({email:a.email,name:a.name&&a.name.display_name}); }catch{}
+  }catch(e){ await setDbx({pkce:null,lastError:"Dropbox sign-in failed: "+(e.message||e)}); render(); return; }
+  await afterConnect();
+}
+function shortErr(m){ m=String(m||""); if(/rate.?limit|too_many|concurrency/i.test(m)) return "Dropbox was busy setting up your app folder. Wait a minute, then tap Connect Dropbox again."; m=m.split(/ORIGINAL STACK|\n/)[0].trim(); return m.length>160?m.slice(0,157)+"…":m; }
+async function afterConnect(){
+  render();
+  let man; try{ man=await dbxReadJSON("/live/manifest.json"); }catch(e){ toast("Connected, but Dropbox couldn't be read: "+e.message); return; }
+  if(!man){
+    if(S.coins.length){ toast("Dropbox connected — sending your collection"); S.meta.needFull=true; S.meta.snapDirty=true; await saveMeta(); await syncNow({takeOver:true}); }
+    else { toast("Dropbox connected — no collection there yet. Restore a backup or add a coin."); dbxListBackups(); }
+    return;
   }
-  return out;
+  if(man.owner===deviceId()){ await syncNow(); return; }
+  if(!S.coins.length){ await dbxTakeOver(true); return; }
+  await enterReadOnly(man); S.tab="more"; S.moreView="backup"; render();
+  toast(`Dropbox has a collection from ${man.ownerName||"another device"} — choose what to do`);
 }
-export function nextDue(bill, today) {
-  const far = addDays(today, 366 * 6);
-  const o = occurrences(bill, today, far);
-  return o.length ? o[0] : null;
+async function dbxToken(force){
+  const dx=S.meta.dbx; if(!force&&dx.access&&dx.expires>Date.now()+60000) return dx.access;
+  const r=await fetch(DBX_TOKEN,{method:"POST",body:new URLSearchParams({grant_type:"refresh_token",refresh_token:dx.refresh,client_id:dx.appKey})});
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok){ if(j.error==="invalid_grant"){ await setDbx({refresh:null,access:null,lastError:"Dropbox access was removed or expired — connect Dropbox again"}); } throw new Error(shortErr(j.error_description||j.error||("HTTP "+r.status))); }
+  await setDbx({access:j.access_token,expires:Date.now()+(j.expires_in||14400)*1000}); return j.access_token;
 }
-export function prevDue(bill, today) {
-  const o = occurrences(bill, addDays(today, -366 * 6), addDays(today, -1));
-  return o.length ? o[o.length - 1] : null;
+class DbxErr extends Error{ constructor(m,status,summary){ super(m); this.status=status; this.summary=summary||""; } }
+async function dbxCall(url,opts){
+  for(let i=0;i<4;i++){ const tok=await dbxToken(i>0&&opts._401); const r=await fetch(url,{method:"POST",...opts,headers:{...opts.headers,Authorization:"Bearer "+tok}});
+    if(r.status===401&&!opts._401){ opts._401=true; continue; }
+    if((r.status===429||r.status>=500)&&i<3){ const wait=Math.min(30,Number(r.headers.get("Retry-After"))||2**i); await new Promise(z=>setTimeout(z,wait*1000)); continue; }
+    if(!r.ok){ const t=await r.text().catch(()=>""); let m=t; try{ m=JSON.parse(t).error_summary||t; }catch{} throw new DbxErr(`Dropbox ${r.status}: ${String(m).slice(0,120)}`,r.status,String(m)); }
+    return r; }
 }
-
-// ---------- pay ----------
-export function paydays(settings, from, to) {
-  const base = settings && settings.payday && settings.payday.base;
-  if (!isISO(base)) return [];
-  return occurrences({ refDate: base, freq: 'Fortnightly' }, from, to);
+async function dbxApi(ep,arg){ const r=await dbxCall("https://api.dropboxapi.com/2/"+ep,arg===undefined?{}:{headers:{"Content-Type":"application/json"},body:JSON.stringify(arg)}); const t=await r.text(); return t?JSON.parse(t):null; }
+const dbxArg=o=>JSON.stringify(o).replace(/[\u007f-￿]/g,c=>"\\u"+c.charCodeAt(0).toString(16).padStart(4,"0"));
+async function dbxUpload(path,body,mode){ if(body instanceof Blob&&body.size>145*1048576) throw new Error("a file over 145 MB is too big to send"); const r=await dbxCall("https://content.dropboxapi.com/2/files/upload",{headers:{"Content-Type":"application/octet-stream","Dropbox-API-Arg":dbxArg({path,mode:mode||"overwrite",autorename:mode==="add",mute:true})},body}); return r.json(); }
+async function dbxDownload(path){ const r=await dbxCall("https://content.dropboxapi.com/2/files/download",{headers:{"Dropbox-API-Arg":dbxArg({path})}}); return r.blob(); }
+const notFound=e=>e instanceof DbxErr&&e.status===409&&/not_found/.test(e.summary);
+async function dbxReadJSON(path){ try{ return JSON.parse(await (await dbxDownload(path)).text()); }catch(e){ if(notFound(e)) return null; throw e; } }
+async function dbxList(path,recursive){
+  let r; try{ r=await dbxApi("files/list_folder",{path,recursive:!!recursive}); }catch(e){ if(notFound(e)) return []; throw e; }
+  let es=r.entries; while(r.has_more){ r=await dbxApi("files/list_folder/continue",{cursor:r.cursor}); es=es.concat(r.entries); }
+  return es.filter(e=>e[".tag"]==="file");
 }
-export function payOn(person, iso) {
-  if (!person || !Array.isArray(person.pays) || !person.pays.length) return null;
-  const list = person.pays.filter((p) => !p.del).slice().sort((a, b) => (a.from < b.from ? -1 : 1));
-  let cur = null;
-  for (const p of list) if (p.from <= iso) cur = p;
-  return cur;
+async function dbxMoveToDeleted(path){ const name=path.split("/").pop(); const sub=path.split("/").slice(2,-1).join("/");
+  try{ await dbxApi("files/move_v2",{from_path:path,to_path:`/deleted/${sub?sub+"/":""}${stamp()}_${name}`,autorename:true}); return true; }catch(e){ if(notFound(e)) return false; throw e; } }
+async function pool(items,n,fn){ let i=0; await Promise.all(Array.from({length:Math.min(n,items.length)},async()=>{ while(i<items.length){ const k=i++; await fn(items[k],k); } })); }
+const coinPath=c=>`/live/coins/${c.id}.json`, filePath=f=>`/live/files/${f.id}.${fileExt(f)}`;
+async function fileIndex(){ return JSON.stringify((await dbAll("files")).map(f=>({id:f.id,type:f.type,name:f.name,path:filePath(f).slice(6)}))); }
+async function listBody(s){ return JSON.stringify(await dbAll(s)); }
+async function syncNow(opts={}){
+  if(!dbxOn()) return; if(_syncing){ _syncAgain=true; return; } if(S.readOnly&&!opts.takeOver) return;
+  if(!navigator.onLine){ hdrStatus(); return; }
+  clearTimeout(_syncT); _syncing=true; refreshDbxPanel(); let ok=false;
+  try{
+    const man=await dbxReadJSON("/live/manifest.json");
+    if(man&&man.owner&&man.owner!==deviceId()&&!opts.takeOver){ await enterReadOnly(man); return; }
+    const due=!S.meta.verify||Date.now()-new Date(S.meta.verify.at)>VERIFY_DAYS*864e5;
+    let sent;
+    if(!man||S.meta.needFull||opts.check||due) sent=await dbxReconcile(!man?"first":S.meta.needFull?"restore":"check");
+    else sent=await drainOutbox();
+    if(sent||!man||man.owner!==deviceId()) await writeManifest(man);
+    S.meta.changes=await outboxCount(); if(!S.meta.changes&&!S.meta.needFull) S.meta.lastBackup=new Date().toISOString();
+    S.meta.lastSync=new Date().toISOString(); await setDbx({lastError:null,lastErrorAt:null}); ok=true;
+  }catch(e){
+    const msg=!navigator.onLine||e instanceof TypeError?"couldn't reach Dropbox (no connection?)":shortErr(e&&e.message||e);
+    await setDbx({lastError:msg,lastErrorAt:new Date().toISOString()}).catch(()=>{});
+    if(opts.manual) toast("Dropbox sync failed: "+msg);
+    if(dbxOn()) scheduleSync(60000);
+  }finally{ _syncing=false; refreshDbxPanel(); }
+  if(ok){ if(opts.manual) toast("Dropbox is up to date"); maybeSnapshot(opts.snap).catch(()=>{}); }
+  if(_syncAgain||(ok&&S.meta.changes)){ _syncAgain=false; scheduleSync(500); }
 }
-export function payOverride(doc, personId, payday) {
-  return (doc.payOverrides || []).find((o) => !o.del && o.personId === personId && o.date === payday) || null;
-}
-export function takeHomeFor(doc, personId, payday) {
-  const ov = payOverride(doc, personId, payday);
-  if (ov && typeof ov.takeHome === 'number') return ov.takeHome;
-  const p = payOn((doc.people || []).find((x) => x.id === personId), payday);
-  return p && typeof p.takeHome === 'number' ? p.takeHome : null;
-}
-
-// ---------- amounts ----------
-export function baseAmountOn(bill, iso) {
-  const list = (bill.amounts || []).filter((a) => typeof a.amount === 'number').slice().sort((a, b) => (a.from < b.from ? -1 : 1));
-  if (!list.length) return null;
-  let cur = list[0].amount;
-  for (const a of list) if (a.from <= iso) cur = a.amount;
-  return cur;
-}
-// Amount of one occurrence. "% of pay" bills use that fortnight's pay.
-export function amountOn(bill, iso, doc) {
-  if (bill.amountMode === 'percentPay' && doc && typeof bill.percent === 'number') {
-    const person = (doc.people || []).find((p) => p.id === bill.personId);
-    const pd = paydays(doc.settings, addDays(iso, -13), iso);
-    const payday = pd.length ? pd[pd.length - 1] : iso;
-    const ov = payOverride(doc, bill.personId, payday);
-    const pay = payOn(person, payday);
-    const field = bill.percentBase === 'takeHome' ? 'takeHome' : 'gross';
-    const v = ov && typeof ov[field] === 'number' ? ov[field] : pay && typeof pay[field] === 'number' ? pay[field] : null;
-    if (v !== null) return round2(v * bill.percent / 100);
+async function outboxCount(){ return (await dbAll("outbox")).length; }
+function outboxDone(it){ return new Promise((res,rej)=>{ const t=_db.transaction("outbox","readwrite"); const os=t.objectStore("outbox"); const g=os.get(it.id); g.onsuccess=()=>{ if(g.result&&g.result.at===it.at) os.delete(it.id); }; t.oncomplete=()=>res(); t.onerror=()=>rej(t.error); }); }
+async function drainOutbox(){
+  const items=(await dbAll("outbox")).sort((a,b)=>a.at-b.at); if(!items.length) return 0;
+  let filesChanged=false, remoteFiles=null;
+  for(const it of items){
+    const [kind,id]=[it.id.slice(0,1),it.id.slice(2)];
+    if(kind==="t"){ const c=await dbGet("coins",id); if(c&&it.op!=="del") await dbxUpload(coinPath(c),JSON.stringify(c)); else await dbxMoveToDeleted(`/live/coins/${id}.json`); }
+    else if(kind==="f"){ filesChanged=true; const f=await dbGet("files",id);
+      if(f&&it.op!=="del") await dbxUpload(filePath(f),f.blob);
+      else { remoteFiles=remoteFiles||await dbxList("/live/files"); for(const e of remoteFiles.filter(e=>e.name.toLowerCase().startsWith(id.toLowerCase()+"."))) await dbxMoveToDeleted(e.path_lower); } }
+    else if(kind==="l") await dbxUpload(`/live/${id}.json`,await listBody(id));
+    await outboxDone(it);
   }
-  return baseAmountOn(bill, iso);
+  if(filesChanged) await dbxUpload("/live/files.json",await fileIndex());
+  return items.length;
 }
-export function isEstimate(bill) { return bill.amountMode && bill.amountMode !== 'fixed'; }
-export function annualAmount(bill, today, doc) {
-  const a = amountOn(bill, today, doc);
-  return a === null || !PER_YEAR[bill.freq] ? 0 : a * PER_YEAR[bill.freq];
-}
-
-// ---------- classification ----------
-export function liveBills(doc) { return (doc.bills || []).filter((b) => !b.del); }
-export function inTotals(bill) {
-  if (bill.kind === 'reminder') return false;
-  if (typeof bill.includeInTotals === 'boolean') return bill.includeInTotals;
-  return bill.kind === 'household';
-}
-export function group(bill) {
-  if (bill.kind === 'reminder') return 'reminder';
-  if (bill.kind === 'investment') return inTotals(bill) ? 'household' : 'investment';
-  return inTotals(bill) ? 'household' : 'excluded';
-}
-
-// ---------- paid state ----------
-export function paymentFor(doc, billId, due) {
-  return (doc.payments || []).find((p) => !p.del && p.billId === billId && p.due === due) || null;
-}
-// 'paid' | 'scheduled' (ticked with a paid date still to come) | 'due' (today or later, not paid)
-// | 'overdue' (manual, past, unpaid) | 'missed' (debit flagged as not coming out)
-export function payState(doc, bill, due, today) {
-  const p = paymentFor(doc, bill.id, due);
-  if (p && p.status === 'missed') return 'missed';
-  if (p && isISO(p.date) && today && p.date > today) return 'scheduled';
-  if (p) return 'paid';
-  const tracked = doc.trackedFrom || '0000-01-01';
-  if (due < tracked) return 'paid';
-  // a bill added with an earlier "Started" date: dates before it was added count as already paid
-  if (isISO(bill.addedOn) && due < bill.addedOn) return 'paid';
-  if (bill.payMethod === 'manual') return due < today ? 'overdue' : 'due';
-  return due < today ? 'paid' : 'due';
-}
-
-// ---------- reviews (same rules as tab 11) ----------
-export function reviewInfo(bill, today) {
-  const r = bill.review || {};
-  if (!r.applicable) return { status: 'na', label: 'N/A' };
-  if (!isISO(r.last)) return { status: 'never', label: 'Never reviewed' };
-  if (r.last > today) return { status: 'future', label: 'Date is in the future', next: addMonths(r.last, 12) };
-  const next = addMonths(r.last, 12);
-  if (today > next) return { status: 'overdue', label: 'Overdue', next };
-  if (daysBetween(today, next) <= 30) return { status: 'soon', label: 'Due soon', next };
-  return { status: 'ok', label: 'Up to date', next };
-}
-export function reviewCurrent(bill, today) { const s = reviewInfo(bill, today).status; return s === 'ok' || s === 'soon'; }
-
-// ---------- lookups ----------
-export function byId(list, id) { return (list || []).find((x) => x.id === id && !x.del) || null; }
-export function accountName(doc, id) { const a = byId(doc.accounts, id); return a ? a.name : 'No account set'; }
-export function typeOf(doc, bill) { return byId(doc.types, bill.typeId); }
-export function typeColor(doc, bill) {
-  if (bill.kind === 'reminder') return '#8A948D';
-  const t = typeOf(doc, bill); return t ? t.color : '#8A948D';
-}
-
-// ---------- schedule helpers ----------
-// Every unpaid / upcoming occurrence in a window, newest information applied.
-export function schedule(doc, from, to, today, filter = () => true) {
-  const out = [];
-  for (const b of liveBills(doc)) {
-    if (!filter(b)) continue;
-    for (const d of occurrences(b, from, to)) {
-      const p = paymentFor(doc, b.id, d);
-      const amt = p && p.status === 'paid' && typeof p.amount === 'number' ? p.amount : amountOn(b, d, doc); // what was actually paid, once recorded
-      out.push({ bill: b, due: d, amount: amt, state: payState(doc, b, d, today), group: group(b) });
-    }
-  }
-  out.sort((a, b) => (a.due < b.due ? -1 : a.due > b.due ? 1 : a.bill.name.localeCompare(b.bill.name)));
-  return out;
-}
-export const settled = (state) => state === 'paid' || state === 'scheduled';
-export const isOneOff = (bill) => bill && bill.freq === 'One-off';
-// A one-off bill is done once it's paid (ticked, or a direct debit whose date has passed).
-export function oneOffDone(doc, bill, today) {
-  if (!isOneOff(bill) || !isISO(bill.refDate) || bill.status !== 'active') return false;
-  return settled(payState(doc, bill, bill.refDate, today));
-}
-// How a recorded payment's date compares with the due date.
-export function paidTiming(p, due) {
-  if (!p || !isISO(p.date)) return '';
-  const n = daysBetween(due, p.date);
-  return n === 0 ? 'on the day' : n > 0 ? n + ' day' + (n === 1 ? '' : 's') + ' late' : 'paid early';
-}
-// Bills added in the app before start dates existed: their id holds the moment
-// they were created, so give them that day as their start (imported bills are left alone).
-export function createdFromId(id, tz = 'Australia/Sydney') {
-  const m = /^b_([0-9a-z]{8})/.exec(id || '');
-  if (!m) return null;
-  const ts = parseInt(m[1], 36);
-  if (!(ts > Date.UTC(2026, 0, 1) && ts < Date.UTC(2100, 0, 1))) return null;
-  return todayISO(new Date(ts), tz);
-}
-export function fixNewBillStarts(doc, tz) {
-  const fixed = [];
-  for (const b of doc.bills || []) {
-    if (b.del || isISO(b.startDate) || isISO(b.addedOn)) continue;
-    const made = createdFromId(b.id, tz);
-    if (!made || (doc.trackedFrom && made < doc.trackedFrom)) continue;
-    b.startDate = made; b.addedOn = made; fixed.push(b);
-  }
+async function dbxReconcile(mode){
+  const remote=new Map((await dbxList("/live",true)).map(e=>[e.path_lower,e]));
+  const want=[]; const coins=await dbAll("coins"), files=await dbAll("files");
+  for(const c of coins) want.push([coinPath(c),JSON.stringify(c)]);
+  for(const f of files) want.push([filePath(f),f.blob]);
+  for(const s of LIST_STORES) want.push([`/live/${s}.json`,await listBody(s)]);
+  want.push(["/live/files.json",await fileIndex()]);
+  const keep=new Set(want.map(w=>w[0].toLowerCase())); keep.add("/live/manifest.json");
+  let fixed=0; const pending=await dbAll("outbox");
+  await pool(want,4,async([path,body])=>{ const r=remote.get(path.toLowerCase()); if(!r||r.content_hash!==await dbxHash(body)){ await dbxUpload(path,body); fixed++; } });
+  for(const [p,e] of remote) if(!keep.has(p)&&/^\/live\/(coins|files)\//.test(p)){ await dbxMoveToDeleted(e.path_lower); fixed++; }
+  for(const it of pending) await outboxDone(it);
+  S.meta.needFull=false; S.meta.verify={at:new Date().toISOString(),coins:coins.length,files:files.length,fixed,mode:mode||"check"}; await saveMeta();
   return fixed;
 }
-export function sumAmounts(items) { return round2(items.reduce((a, i) => a + (i.amount || 0), 0)); }
-
-export function totalsByType(doc, items) {
-  const map = new Map();
-  for (const i of items) {
-    const t = typeOf(doc, i.bill);
-    const key = t ? t.id : 'none';
-    const cur = map.get(key) || { type: t, name: t ? t.name : 'Other', color: t ? t.color : '#8A948D', total: 0, count: 0 };
-    cur.total += i.amount || 0; cur.count++;
-    map.set(key, cur);
-  }
-  return [...map.values()].map((x) => ({ ...x, total: round2(x.total) }));
+async function writeManifest(prev){
+  const man={app:APP_ID,schema:1,appVersion:APP_VERSION,owner:deviceId(),ownerName:deviceName(),rev:((prev&&prev.rev)||0)+1,updatedAt:new Date().toISOString(),
+    counts:{coins:S.coins.length,files:(await dbAll("files")).length,wanted:S.wanted.length,receipts:(S.receipts||[]).length}};
+  await dbxUpload("/live/manifest.json",JSON.stringify(man,null,1)); S.meta.owner={id:man.owner,name:man.ownerName,at:man.updatedAt}; await saveMeta();
 }
-
-// Day-before transfers from savings to personal.
-export function transfers(doc, from, to, today) {
-  const items = schedule(doc, addDays(from, 1), addDays(to, 1), today, (b) => b.transferDayBefore && b.status === 'active');
-  const days = new Map();
-  for (const i of items) {
-    const t = addDays(i.due, -1);
-    if (t < from || t > to) continue;
-    const cur = days.get(t) || { date: t, items: [], total: 0 };
-    cur.items.push(i); cur.total = round2(cur.total + (i.amount || 0));
-    days.set(t, cur);
-  }
-  return [...days.values()].sort((a, b) => (a.date < b.date ? -1 : 1)).map((d) => ({ ...d, check: ((doc.transferChecks || {})[d.date] && !(doc.transferChecks || {})[d.date].undone) ? doc.transferChecks[d.date] : null }));
+async function enterReadOnly(man){ S.readOnly=true; S.meta.readOnly=true; S.meta.owner={id:man.owner,name:man.ownerName,at:man.updatedAt}; await saveMeta(); clearTimeout(_syncT); render(); }
+async function dbxTakeOver(){
+  const st=$("#rsStat"); const say=m=>{ if($("#rsStat")) $("#rsStat").textContent=m; else toast(m); };
+  const man=await dbxReadJSON("/live/manifest.json");
+  if(!man){ S.readOnly=false; S.meta.readOnly=false; await saveMeta(); await syncNow({takeOver:true}); render(); return; }
+  if(S.coins.length){ say("Saving a snapshot of this device first…"); await uploadSnapshot("before-restore"); }
+  say("Downloading your collection from Dropbox…");
+  await dbxPull(m=>say(m));
+  await syncNow({takeOver:true});
+  S.tab="coins"; render(); toast(`${S.coins.length} coins downloaded from Dropbox — this is now the main ${devWord()}`);
+  if(st) st.textContent="";
 }
-
-// Things that need attention, highest first (mirrors tab 11's follow-ups).
-export function followUps(doc, today) {
-  const out = [];
-  for (const b of liveBills(doc)) {
-    if (b.status === 'stopped') continue;
-    if (oneOffDone(doc, b, today)) continue;
-    const name = b.name;
-    if (b.status === 'pending') { out.push({ bill: b, p: 3, text: 'Not started yet — add the details when known' }); continue; }
-    const nd = nextDue(b, today);
-    const days = nd ? daysBetween(today, nd) : null;
-    const rv = reviewInfo(b, today);
-    const amt = nd ? amountOn(b, nd, doc) : baseAmountOn(b, today);
-    const t = [];
-    let p = 9;
-    if (b.payMethod === 'manual') {
-      const past = occurrences(b, addDays(today, -60), addDays(today, -1)).filter((d) => payState(doc, b, d, today) === 'overdue');
-      if (past.length) { p = 1; t.push('Not paid yet — was due ' + fmtDate(past[past.length - 1])); }
-    }
-    // Already paid early? Then the "due soon" warnings for that date don't apply.
-    const ndPaid = nd ? settled(payState(doc, b, nd, today)) : false;
-    if (nd && !ndPaid && b.freq === 'Every 5 yrs' && days <= 90) { p = Math.min(p, 1); t.push('Renewal due ' + fmtDate(nd, { year: true }) + ' — renew'); }
-    if (nd && !ndPaid && LUMP.has(b.freq) && days <= 14) { p = Math.min(p, 1); t.push(money(amt, 0) + ' lump sum due in ' + days + ' day(s)' + (b.payMethod === 'manual' ? ' — pay it yourself' : b.accountId ? ' — check funds in ' + accountName(doc, b.accountId) : '')); }
-    if (nd && rv.status !== 'na' && (b.freq === 'Annual' || b.freq === 'Every 5 yrs') && days <= 45 && !reviewCurrentStrict(b, today)) { p = Math.min(p, 1); t.push('Renews in ' + days + ' days — review & compare before it renews'); }
-    if (rv.status === 'overdue') { p = Math.min(p, 1); t.push('Review overdue (last reviewed ' + fmtDate(b.review.last, { year: true }) + ')'); }
-    if (rv.status === 'future') { p = Math.min(p, 2); t.push('Last-reviewed date is in the future — check it'); }
-    if (rv.status === 'never') { p = Math.min(p, 2); t.push("Never reviewed — check you're on the best deal"); }
-    if (rv.status === 'soon') { p = Math.min(p, 2); t.push('Review due by ' + fmtDate(rv.next, { year: true })); }
-    for (const td of b.todos || []) if (!td.done && !td.del) { p = Math.min(p, 2); t.push(td.text); }
-    if (!nd && !isISO(b.refDate)) { p = Math.min(p, 3); t.push('No due date — add one due date'); }
-    if (amt === null) { p = Math.min(p, 3); t.push('No amount yet'); }
-    else if (amt === 0) { p = Math.min(p, 3); t.push('Amount is $0 — confirm or remove'); }
-    if (b.expectedChange) { p = Math.min(p, 3); t.push('Expected change: ' + b.expectedChange); }
-    if (b.kind !== 'reminder' && !b.provider) { p = Math.min(p, 3); t.push('Provider missing'); }
-    if (t.length) out.push({ bill: b, p, text: t.join(' · '), next: nd, days });
-  }
-  out.sort((a, b) => a.p - b.p || (a.days ?? 9999) - (b.days ?? 9999));
-  return out;
+async function dbxPull(progress){
+  const index=await dbxReadJSON("/live/files.json")||[]; const lists={}; for(const s of LIST_STORES) lists[s]=await dbxReadJSON(`/live/${s}.json`)||[];
+  const cfiles=(await dbxList("/live/coins")).filter(e=>/\.json$/.test(e.name));
+  const coins=[], blobs=[]; let n=0; const total=cfiles.length+index.length;
+  await pool(cfiles,4,async e=>{ coins.push(JSON.parse(await (await dbxDownload(e.path_lower)).text())); if(++n%5===0) progress&&progress(`Downloading ${n} of ${total}…`); });
+  await pool(index,4,async f=>{ const b=await dbxDownload("/live/"+f.path); blobs.push({id:f.id,type:f.type,name:f.name,blob:new Blob([b],{type:f.type})}); if(++n%5===0) progress&&progress(`Downloading ${n} of ${total}…`); });
+  _bulk++; try{
+    for(const s of ["coins","wanted","settings","receipts","files","outbox"]) await dbClear(s);
+    for(const u of Object.values(S.urls)) URL.revokeObjectURL(u); S.urls={};
+    for(const f of blobs) await dbPut("files",f); for(const c of coins) await dbPut("coins",c);
+    for(const s of LIST_STORES) for(const x of lists[s]) await dbPut(s,x);
+    S.readOnly=false; S.meta.readOnly=false; S.meta.changes=0; S.meta.needFull=false; S.meta.snapDirty=false; S.meta.lastBackup=new Date().toISOString(); await saveMeta();
+    await reload();
+  }finally{ _bulk--; }
+  askPersist();
+  S.meta.verify={at:new Date().toISOString(),coins:coins.length,files:blobs.length,fixed:0}; await saveMeta();
 }
-// tab 11 treats a review as current while today <= next review date
-function reviewCurrentStrict(bill, today) { const r = reviewInfo(bill, today); return r.status === 'ok' || r.status === 'soon'; }
-
-// ---------- reports ----------
-export function fyStart(iso) { const [y, m] = iso.split('-').map(Number); return (m >= 7 ? y : y - 1) + '-07-01'; }
-export function periodRange(kind, anchor, doc) {
-  const [y, m] = anchor.split('-').map(Number);
-  if (kind === 'month') { const s = y + '-' + pad(m) + '-01'; return { from: s, to: addDays(addMonths(s, 1), -1), label: monthName(m - 1) + ' ' + y }; }
-  if (kind === 'quarter') { const qm = Math.floor((m - 1) / 3) * 3 + 1; const s = y + '-' + pad(qm) + '-01'; return { from: s, to: addDays(addMonths(s, 3), -1), label: 'Quarter ' + monthName(qm - 1, false) + '–' + monthName(qm + 1, false) + ' ' + y }; }
-  if (kind === 'fy') { const s = fyStart(anchor); const e = addDays(addMonths(s, 12), -1); return { from: s, to: e, label: 'Financial year ' + s.slice(0, 4) + '–' + e.slice(2, 4) }; }
-  if (kind === 'cal') { return { from: y + '-01-01', to: y + '-12-31', label: 'Calendar year ' + y }; }
-  if (kind === 'pay') {
-    const pd = paydays(doc.settings, addDays(anchor, -13), anchor);
-    const s = pd.length ? pd[pd.length - 1] : anchor;
-    return { from: s, to: addDays(s, 13), label: 'Pay fortnight ' + fmtDate(s) + ' – ' + fmtDate(addDays(s, 13), { year: true }) };
-  }
-  return { from: anchor, to: anchor, label: anchor };
+async function uploadSnapshot(kind){
+  const {blob,name}=await buildBackup(kind||"snapshot"); await dbxUpload("/snapshots/"+name,blob,"add");
+  await setDbx({lastSnap:new Date().toISOString(),lastSnapSize:blob.size}); return name;
 }
-export function shiftPeriod(kind, anchor, dir) {
-  if (kind === 'month') return addMonths(anchor, dir);
-  if (kind === 'quarter') return addMonths(anchor, 3 * dir);
-  if (kind === 'fy' || kind === 'cal') return addMonths(anchor, 12 * dir);
-  if (kind === 'pay') return addDays(anchor, 14 * dir);
-  return anchor;
+async function maybeSnapshot(force){
+  if(!dbxOn()||S.readOnly||!S.coins.length) return;
+  if(!force){ if(!S.meta.snapDirty||S.meta.lastSnapDay===todayStr()) return; if((S.meta.dbx||{}).wifiOnly!==false&&onCellular()) return; }
+  if(force) toast("Making a snapshot…");
+  await uploadSnapshot("snapshot"); S.meta.lastSnapDay=todayStr(); S.meta.snapDirty=false; await saveMeta(); refreshDbxPanel();
+  if(force) toast("Snapshot saved to Dropbox");
+  pruneSnapshots().catch(()=>{});
 }
-
-// Rent received in a period (weekly rent counted per day, so part-weeks are fair).
-export function rentIn(doc, property, from, to) {
-  if (!property || property.del) return 0;
-  const rents = (property.rents || []).filter((r) => !r.del && isISO(r.from) && typeof r.weekly === 'number').sort((a, b) => (a.from < b.from ? -1 : 1));
-  if (!rents.length) return 0;
-  let total = 0;
-  for (let d = from; d <= to; d = addDays(d, 1)) {
-    if (isISO(property.soldAt) && d > property.soldAt) break;
-    if ((property.vacancies || []).some((v) => !v.del && d >= v.from && d <= (v.to || '9999-12-31'))) continue;
-    let cur = null;
-    for (const r of rents) if (r.from <= d) cur = r;
-    if (cur) total += cur.weekly / 7;
-  }
-  return round2(total);
+async function pruneSnapshots(){
+  const list=(await dbxList("/snapshots")).sort((a,b)=>String(b.server_modified).localeCompare(String(a.server_modified)));
+  const now=Date.now(), months=new Set();
+  for(const e of list){ const t=new Date(e.server_modified), age=(now-t)/864e5;
+    if(age<=SNAP_DAILY_DAYS) continue;
+    const m=t.getFullYear()+"-"+t.getMonth();
+    if(age<=SNAP_MONTHS*31&&!months.has(m)){ months.add(m); continue; }
+    await dbxApi("files/delete_v2",{path:e.path_lower}); }
 }
-export function propertyCosts(doc, propertyId, from, to, today) {
-  return sumAmounts(schedule(doc, from, to, today, (b) => b.kind === 'investment' && (b.propertyId || null) === (propertyId || null)));
+async function dbxListBackups(){
+  const el=$("#dbxList"); if(!el) return; el.innerHTML=`<p class="muted small">Looking in Dropbox…</p>`;
+  try{ const list=(await dbxList("/snapshots")).filter(e=>/\.zip$/i.test(e.name)).sort((a,b)=>String(b.server_modified).localeCompare(String(a.server_modified)));
+    el.innerHTML=list.length?`<div class="lst">${list.slice(0,60).map(e=>`<div class="item"><div><b>${esc(fmtWhen(e.server_modified))}</b><div class="muted small">${/before-restore/.test(e.name)?"Before a restore · ":""}${(e.size/1048576).toFixed(1)} MB</div></div><button type="button" class="btn sm" data-dbxget="${esc(e.path_lower)}">Use this</button></div>`).join("")}</div>`:`<p class="muted small">No snapshots in Dropbox yet.</p>`;
+  }catch(e){ el.innerHTML=`<p class="small warnTxt">Couldn't list Dropbox snapshots: ${esc(e.message||e)}</p>`; }
 }
-
-// Price history of one bill, oldest first, with % change.
-export function priceHistory(bill) {
-  const list = (bill.amounts || []).filter((a) => typeof a.amount === 'number').slice().sort((a, b) => (a.from < b.from ? -1 : 1));
-  return list.map((a, i) => {
-    const prev = i ? list[i - 1].amount : null;
-    return { ...a, change: prev === null ? null : round2(a.amount - prev), pct: prev ? round2((a.amount - prev) / prev * 100) : null };
-  });
+async function dbxDisconnect(){
+  try{ await dbxApi("auth/token/revoke"); }catch{}
+  const dx=S.meta.dbx||{}; S.meta.dbx={appKey:dx.appKey,wifiOnly:dx.wifiOnly}; S.readOnly=false; S.meta.readOnly=false; await saveMeta(); clearTimeout(_syncT); render(); toast("Dropbox disconnected — everything already in Dropbox is kept");
 }
-export function priceChanges(doc, from, to) {
-  const out = [];
-  for (const b of liveBills(doc)) {
-    for (const h of priceHistory(b)) if (h.change !== null && h.from >= from && h.from <= to) out.push({ bill: b, ...h });
-  }
-  return out.sort((a, b) => (a.from < b.from ? -1 : 1));
-}
-
-// ---------- merging two copies (Shaun's and Lyndsey's phones) ----------
-const COLLECTIONS = ['accounts', 'types', 'properties', 'bills', 'payments', 'people', 'others', 'payOverrides'];
-function mergeList(a = [], b = []) {
-  const map = new Map();
-  for (const x of a) map.set(x.id, x);
-  for (const y of b) { const x = map.get(y.id); if (!x || (y.u || 0) > (x.u || 0)) map.set(y.id, y); }
-  return [...map.values()];
-}
-export function mergeDocs(a, b) {
-  if (!a) return b; if (!b) return a;
-  const out = { ...a };
-  for (const k of COLLECTIONS) out[k] = mergeList(a[k], b[k]);
-  out.settings = ((b.settings && b.settings.u) || 0) > ((a.settings && a.settings.u) || 0) ? b.settings : a.settings;
-  const tc = { ...(a.transferChecks || {}) };
-  for (const [k, v] of Object.entries(b.transferChecks || {})) if (!tc[k] || (v.u || 0) > (tc[k].u || 0)) tc[k] = v;
-  out.transferChecks = tc;
-  const acts = mergeList(a.activity, b.activity).sort((x, y) => (y.at || 0) - (x.at || 0)).slice(0, 400);
-  out.activity = acts;
-  out.trackedFrom = [a.trackedFrom, b.trackedFrom].filter(Boolean).sort()[0] || null;
-  out.schema = Math.max(a.schema || 1, b.schema || 1);
-  out.updatedAt = Math.max(a.updatedAt || 0, b.updatedAt || 0);
-  return out;
-}
-
-// ---------- validation ----------
-export function validateBill(b, today) {
-  const errs = [];
-  if (!b.name || !b.name.trim()) errs.push('Give the bill a name.');
-  if (b.status !== 'pending') {
-    if (!FREQS.includes(b.freq)) errs.push('Choose how often it comes.');
-    if (!isISO(b.refDate)) errs.push('Add one due date (past or upcoming).');
-  }
-  for (const a of b.amounts || []) if (typeof a.amount === 'number' && (a.amount < 0 || a.amount > 10000000)) errs.push('Check the amount.');
-  if (b.review && b.review.applicable && isISO(b.review.last) && b.review.last > today) errs.push("Last reviewed can't be in the future.");
-  if (isISO(b.endDate) && isISO(b.refDate) && b.endDate < b.refDate) errs.push('End date is before the due date.');
-  if (b.amountMode === 'percentPay' && !(b.percent > 0 && b.percent < 100)) errs.push('Set the % of pay.');
-  return errs;
-}
-
-// ---------- alerts (used by the 7 am / 6 pm job) ----------
-export function alertLine(i, today) {
-  const wk = isWeekend(i.due) && i.bill.payMethod !== 'manual' ? ' (may come out ' + fmtDate(nextWeekday(i.due)) + ')' : '';
-  const est = isEstimate(i.bill) ? '≈' : '';
-  const mine = i.bill.payMethod === 'manual' ? ' — pay yourself' : '';
-  return i.bill.name + ' ' + est + money(i.amount) + wk + mine;
-}
-export function buildAlerts(doc, now = new Date()) {
-  const tz = (doc.settings && doc.settings.timezone) || 'Australia/Sydney';
-  const today = todayISO(now, tz);
-  const hour = hourIn(now, tz);
-  const s = doc.settings || {};
-  const r = s.reminders || {};
-  const out = { morning: [], evening: [], today, hour };
-  const digestDays = r.digestDays ?? 3;
-  const lumpDays = r.lumpDays || [14];
-  const reviewDays = r.reviewDays ?? 45;
-  const active = (b) => b.status === 'active' && b.remind !== false;
-
-  // Morning digest: anything due today .. +digestDays not yet paid.
-  const soon = schedule(doc, today, addDays(today, digestDays), today, active).filter((i) => i.state === 'due');
-  if (soon.length) {
-    const byDay = new Map();
-    for (const i of soon) { const k = i.due; if (!byDay.has(k)) byDay.set(k, []); byDay.get(k).push(i); }
-    const lines = [...byDay.entries()].map(([d, list]) => {
-      const n = daysBetween(today, d);
-      const label = n === 0 ? 'Today' : n === 1 ? 'Tomorrow' : fmtDate(d);
-      return label + ': ' + list.map((i) => alertLine(i, today)).join(' · ');
-    });
-    out.morning.push({ title: soon.length + (soon.length === 1 ? ' bill' : ' bills') + ' in the next ' + digestDays + ' days — ' + money(sumAmounts(soon)), message: lines.join('\n'), tags: ['calendar'], priority: 3 });
-  }
-  // Big one-off bills N days out.
-  for (const n of lumpDays) {
-    if (n <= digestDays) continue;
-    const d = addDays(today, n);
-    for (const i of schedule(doc, d, d, today, (b) => active(b) && LUMP.has(b.freq))) {
-      if (i.state !== 'due') continue;
-      const rv = reviewInfo(i.bill, today);
-      const extra = rv.status !== 'na' && !reviewCurrent(i.bill, today) ? ' Review due — compare quotes before it renews.' : '';
-      out.morning.push({ title: 'Big bill in ' + n + ' days', message: i.bill.name + ' ' + money(i.amount) + ' · due ' + fmtDate(i.due) + '.' + extra, tags: ['moneybag'], priority: 4 });
-    }
-  }
-  // Pay-yourself bills that are overdue: every morning until ticked.
-  const overdue = schedule(doc, addDays(today, -60), addDays(today, -1), today, (b) => active(b) && b.payMethod === 'manual').filter((i) => i.state === 'overdue');
-  for (const i of overdue) out.morning.push({ title: 'Not paid yet', message: i.bill.name + ' ' + money(i.amount) + ' was due ' + fmtDate(i.due) + '. Tick it in Bills once paid.', tags: ['warning'], priority: 4 });
-  // Transfers that should happen today.
-  const tr = transfers(doc, today, today, today);
-  for (const t of tr) out.morning.push({ title: 'Savings → personal today: ' + money(t.total), message: 'For ' + t.items.map((i) => i.bill.name + ' ' + (isEstimate(i.bill) ? '≈' : '') + money(i.amount)).join(' · ') + ' due ' + fmtDate(addDays(t.date, 1)) + '. Tick it in Bills when you see it go through.', tags: ['arrows_counterclockwise'], priority: 3 });
-  // Reviews, once a week on Mondays.
-  if (dow(today) === 1) {
-    const rv = [];
-    for (const b of liveBills(doc)) {
-      if (b.status !== 'active') continue;
-      const info = reviewInfo(b, today);
-      if (!['soon', 'overdue', 'never', 'future'].includes(info.status)) continue;
-      const nd = nextDue(b, today);
-      const renew = nd && (b.freq === 'Annual' || b.freq === 'Every 5 yrs') && daysBetween(today, nd) <= reviewDays ? ' (renews ' + fmtDate(nd) + ')' : '';
-      rv.push(b.name + ' — ' + (info.status === 'soon' ? 'review by ' + fmtDate(info.next, { year: true }) : info.label.toLowerCase()) + renew);
-    }
-    if (rv.length) out.morning.push({ title: rv.length + ' bill review' + (rv.length > 1 ? 's' : '') + ' due', message: rv.join('\n'), tags: ['mag'], priority: 2 });
-  }
-  // Evening: transfer not ticked yet.
-  for (const t of tr) if (!t.check) out.evening.push({ title: 'Transfer not ticked: ' + money(t.total), message: 'It should have moved from savings to personal today for ' + t.items.map((i) => i.bill.name).join(', ') + '. Move it by hand if it hasn\'t, then tick it in Bills.', tags: ['warning'], priority: 4 });
-  // Sunday evening: the week ahead.
-  if (dow(today) === 0 && r.weekly !== false) {
-    const wk = schedule(doc, addDays(today, 1), addDays(today, 7), today, (b) => active(b) && inTotals(b));
-    if (wk.length) {
-      const top = wk.slice().sort((a, b) => (b.amount || 0) - (a.amount || 0)).slice(0, 2);
-      out.evening.push({ title: 'This week: ' + wk.length + ' bills — ' + money(sumAmounts(wk)), message: 'Biggest: ' + top.map((i) => i.bill.name + ' ' + money(i.amount) + ' ' + fmtDate(i.due)).join(' · '), tags: ['spiral_calendar'], priority: 2 });
-    }
-  }
-  return out;
+function refreshDbxPanel(){ const el=$("#dbxPanel"); if(el) el.outerHTML=dbxPanel(); hdrStatus(); }
+function dbxPanel(){
+  const dx=S.meta.dbx||{}, ch=S.meta.changes||0, v=S.meta.verify;
+  if(!dbxOn()) return `<div class="panel" id="dbxPanel"><h3>Dropbox</h3>
+    <p class="m0">Connect Dropbox and your collection is kept there as well as on this ${devWord()}: each coin and photo is sent within seconds of saving, and a full snapshot is kept each day. If this ${devWord()} is cleared, lost or replaced, connect Dropbox on the new one and everything comes back.</p>
+    ${dx.lastError?`<p class="small warnTxt m0">${esc(dx.lastError)}</p>`:""}
+    ${DBX_APP_KEY?"":`<div class="field"><label for="dbxKey">Dropbox App key</label><input id="dbxKey" autocomplete="off" autocapitalize="off" spellcheck="false" value="${esc(dx.appKey||"")}" placeholder="from the Dropbox App Console"></div>`}
+    <div class="row"><button type="button" class="btn primary" data-dbxconnect>Connect Dropbox</button></div>
+    ${DBX_APP_KEY?"":`<p class="muted small m0">First time: create the app at dropbox.com/developers/apps (steps in the README). Its Redirect URI must be exactly <code class="sel">${esc(dbxRedirect())}</code></p>`}</div>`;
+  const status=S.readOnly?`View only — replaced by ${esc((S.meta.owner||{}).name||"another device")}`:_syncing?"Syncing now…":ch?`${ch} change${ch===1?"":"s"} waiting to send`:"All changes in Dropbox ✓";
+  return `<div class="panel" id="dbxPanel"><h3>Dropbox</h3>
+    <dl class="dbxst"><dt>Account</dt><dd>${esc(dx.email||dx.name||"Connected")}</dd>
+    <dt>This ${devWord()}</dt><dd>${S.readOnly?"View only":"Main device"}</dd>
+    <dt>Status</dt><dd>${status}</dd>
+    <dt>Last sync</dt><dd>${S.meta.lastSync?fmtWhen(S.meta.lastSync):"Not yet"}</dd>
+    <dt>Last check</dt><dd>${v?`${fmtWhen(v.at)} · ${v.coins} coins, ${v.files} photos${v.fixed?` · fixed ${v.fixed}`:" · all match ✓"}`:"Not yet"}</dd>
+    <dt>Last snapshot</dt><dd>${dx.lastSnap?`${fmtWhen(dx.lastSnap)} · ${(dx.lastSnapSize/1048576).toFixed(1)} MB`:"Not yet"}</dd>
+    ${dx.lastError?`<dt>Problem</dt><dd class="warnTxt">${esc(dx.lastError)}${dx.lastErrorAt?` (${fmtWhen(dx.lastErrorAt)})`:""}</dd>`:""}</dl>
+    <label class="check-inline"><input type="checkbox" id="dbxWifi" ${dx.wifiOnly!==false?"checked":""}><span>Daily snapshots on Wi-Fi only <span class="muted small">(coins and photos always send straight away)</span></span></label>
+    <div class="row">${S.readOnly?`<button type="button" class="btn primary" data-dbxtake>Make this the main ${devWord()}</button>`:`<button type="button" class="btn primary" data-dbxsync ${_syncing?"disabled":""}>Sync now</button><button type="button" class="btn" data-dbxcheck ${_syncing?"disabled":""}>Check Dropbox copy</button><button type="button" class="btn" data-dbxsnap ${_syncing?"disabled":""}>Snapshot now</button>`}<button type="button" class="btn ghost" data-dbxoff>Disconnect</button></div>
+    <p class="muted small m0">In Dropbox › Apps › <i>your app's name</i>: <b>live</b> is the current collection (one file per coin, photo and receipt), <b>snapshots</b> holds daily full backups (every day for ${SNAP_DAILY_DAYS} days, then one a month for ${SNAP_MONTHS} months), and <b>deleted</b> keeps anything you delete.</p></div>`;
 }
