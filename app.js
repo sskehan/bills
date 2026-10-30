@@ -4,7 +4,7 @@ import * as St from './store.js';
 import { makeSetupCode, readSetupCode, unlock } from './crypto.js';
 import * as DB from './dropbox.js';
 
-const APP_VERSION = '1.3';
+const APP_VERSION = '1.4';
 import { h, raw, esc, icon, toast, openSheet, closeSheet, confirmSheet, download, pickFile, copyText } from './ui.js';
 
 const PALETTE = [['#2a78d6', 'Blue'], ['#eb6834', 'Orange'], ['#1baf7a', 'Aqua'], ['#eda100', 'Yellow'], ['#e87ba4', 'Pink'], ['#008300', 'Green'], ['#6250d6', 'Violet'], ['#e34948', 'Red'], ['#8A948D', 'Grey']];
@@ -121,6 +121,7 @@ async function dbxReturn(params) {
       S.dev.passphrase = p;
     }
     await saveDev();
+    if (rm) await relinkGithub(JSON.parse(await cl.download(DB.LIVE)));
     if (!S.doc && !remoteDoc) { toast('Dropbox is connected, but there are no bills in it yet', 5000); render(); return; }
     const wasEmpty = !S.doc;
     S.doc = S.doc || St.joinDoc();
@@ -130,6 +131,20 @@ async function dbxReturn(params) {
     queueSync(500);
   } catch (e) { toast(e.message, 6000); }
   render();
+}
+// GitHub connection lost (e.g. Chrome cleared) but Dropbox has it: put it back.
+async function relinkGithub(fileEnv) {
+  if (S.dev.github || !S.dev.passphrase) return false;
+  try {
+    if (!fileEnv) { const cl = dbxClient(); if (!(await cl.meta(DB.LIVE))) return false; fileEnv = JSON.parse(await cl.download(DB.LIVE)); }
+    const gh = await DB.readLink(fileEnv, S.dev.passphrase);
+    if (!gh) return false;
+    await St.ghCheck(gh);
+    S.dev.github = gh; await saveDev(); S.sync = 'off';
+    toast('GitHub reconnected — alerts and sharing are back on', 5000);
+    doSync();
+    return true;
+  } catch (e) { return false; }
 }
 // Swap in an older copy (backup history or a Dropbox snapshot) on every phone.
 async function replaceDoc(old, label) {
@@ -260,6 +275,7 @@ function scrUpcoming() {
   const pending = (d.settings.payCheckPending || []).length;
   return h`
   ${head('Upcoming', h`<a class="icon-btn" href="#/reports" aria-label="Reports">${icon('chart')}</a><a class="icon-btn brand" href="#/edit/new" aria-label="Add a bill">${icon('plus')}</a>`)}
+  ${!S.dev.github && d.settings.ntfy && d.settings.ntfy.topic ? h`<a class="banner red row" href="#/sync" style="color:inherit">${icon('warn', 20)}<span class="grow"><b>Not saving to GitHub.</b> Your 7 am alerts${S.dev.name === 'Shaun' ? ' and Lyndsey’s phone' : ''} are using old information. Tap to reconnect.</span>${icon('next', 18)}</a>` : S.dev.github && S.sync === 'error' ? h`<a class="banner red row" href="#/sync" style="color:inherit">${icon('warn', 20)}<span class="grow"><b>GitHub isn't accepting changes:</b> ${S.syncErr} Alerts are using old information until this is fixed.</span>${icon('next', 18)}</a>` : ''}
   ${!DB.isOn(S.dev) ? h`<a class="banner amber row" href="#/sync" style="color:inherit">${icon('warn', 20)}<span class="grow">Your bills aren't in Dropbox yet. <b>Connect Dropbox</b> so clearing Chrome can't lose them.</span>${icon('next', 18)}</a>` : S.dbx === 'error' ? h`<a class="banner red row" href="#/sync" style="color:inherit">${icon('warn', 20)}<span class="grow">Dropbox backup problem: ${S.dbxErr}</span>${icon('next', 18)}</a>` : ''}
   ${pending ? h`<a class="banner amber row" href="#/checkpay" style="color:inherit">${icon('warn', 20)}<span class="grow">Confirm how <b>${pending}</b> imported bills are paid (direct debit or you pay them).</span>${icon('next', 18)}</a>` : ''}
   <section class="hero" aria-label="Summary">
@@ -448,7 +464,8 @@ function scrSettings() {
   <div class="eyebrow">Sharing, backup & Excel</div>
   <div class="card list">${link('#/sync', 'Sharing with Lyndsey & backup', [S.dev.github ? 'GitHub ✓' + (S.dev.lastSync ? ' ' + new Date(S.dev.lastSync).toLocaleString('en-AU', { dateStyle: 'medium', timeStyle: 'short' }) : '') : 'GitHub not connected', DB.isOn(S.dev) ? (S.dbx === 'error' ? 'Dropbox problem' : 'Dropbox ✓') : 'Dropbox not connected'].join(' · '))}
   ${link('#/excel', 'Excel workbook', 'Refresh button for tab 11 · or download a CSV')}
-  ${link('#/activity', 'Recent changes', 'Who changed what')}</div>
+  ${link('#/activity', 'Recent changes', 'Who changed what')}
+  ${link('#/health', 'Check my bills', 'Looks for anything that would make a total or an alert wrong')}</div>
   <div class="card pad small muted" style="line-height:1.5">This phone: <b>${S.dev.name || 'not named'}</b> · <button class="btn small ghost" data-act="rename-device">Change</button><br>Data imported ${d.importedAt ? C.fmtDate(d.importedAt, { year: true }) : '—'}${d.importedFrom ? ' from ' + d.importedFrom : ''}. Version ${APP_VERSION}.</div>`;
 }
 
@@ -865,6 +882,26 @@ function clearWarn() {
   return h`<div class="banner amber small" style="line-height:1.5"><b>Clearing Chrome?</b> In <i>Delete browsing data</i>, untick <b>Cookies and site data</b>. That option deletes the bills on this phone. They'd still be in ${DB.isOn(S.dev) ? 'Dropbox' : ''}${DB.isOn(S.dev) && S.dev.github ? ' and ' : ''}${S.dev.github ? 'GitHub' : ''}${!DB.isOn(S.dev) && !S.dev.github ? 'a backup only if you’ve connected one' : ''}, but you'd need the passphrase to get them back.</div>`;
 }
 
+// ----- check my bills -----
+function scrHealth() {
+  const d = doc(), t = today();
+  const dev = [];
+  const day = 24 * 3600 * 1000;
+  if (!S.dev.github) dev.push({ level: 'red', text: 'Not connected to GitHub — the 7 am alerts and Lyndsey’s phone are using old information.', href: '#/sync', fix: 'Reconnect' });
+  else if (S.sync === 'error') dev.push({ level: 'red', text: 'GitHub isn’t accepting changes: ' + S.syncErr, href: '#/sync', fix: 'Open' });
+  else if (!S.dev.lastSync || Date.now() - S.dev.lastSync > day) dev.push({ level: 'amber', text: 'Last saved to GitHub ' + (S.dev.lastSync ? new Date(S.dev.lastSync).toLocaleString('en-AU', { dateStyle: 'medium', timeStyle: 'short' }) : 'never') + '.', href: '#/sync', fix: 'Sync now' });
+  if (!DB.isOn(S.dev)) dev.push({ level: 'amber', text: 'Dropbox backup isn’t connected on this phone.', href: '#/sync', fix: 'Connect' });
+  else if (S.dbx === 'error') dev.push({ level: 'red', text: 'Dropbox backup problem: ' + S.dbxErr, href: '#/sync', fix: 'Open' });
+  const items = dev.concat(C.healthCheck(d, t));
+  const red = items.filter((x) => x.level === 'red').length, amber = items.length - red;
+  const counted = C.liveBills(d).filter((b) => b.status === 'active').length;
+  return h`${back('#/settings', 'Check my bills', 'Run on this phone · ' + C.fmtDate(t, { year: true }))}
+  <div class="card pad stack" style="gap:6px">${!items.length ? h`<div class="banner green"><b>All clear.</b> Every one of your ${counted} active bills has a date, an amount and an account, nothing is unpaid, and backups are working.</div>`
+    : h`<div class="row" style="gap:10px"><span class="pill ${red ? 'solid-red' : 'amber'}">${red ? red + ' to fix' : 'Nothing urgent'}</span>${amber ? h`<span class="pill amber">${amber} to look at</span>` : ''}</div><div class="small muted">Checked ${counted} active bills, every payment tick, your accounts, payday, alerts and backups.</div>`}</div>
+  ${items.length ? h`<div class="card list">${items.map((x) => h`<a class="item" href="${x.bill ? '#/bill/' + x.bill.id : x.href || '#/settings'}"><span class="pill ${x.level === 'red' ? 'solid-red' : 'amber'}">${x.level === 'red' ? 'FIX' : 'CHECK'}</span><span class="grow stack" style="gap:2px"><span class="t" style="font-weight:600">${x.bill ? x.bill.name : 'Setup'}</span><span class="s">${x.text}</span></span>${icon('next', 18)}</a>`)}</div>` : ''}
+  <div class="card pad small muted" style="line-height:1.5"><b>What's checked:</b> every active bill has a usable due date and an amount; it's paid from an account you still have; ticks sit on dates the bill actually falls on; nothing pay-it-yourself is left unticked; no direct debit is flagged "didn't come out"; no bill is in twice; payday and the alert topic are set; and this phone is saving to GitHub and Dropbox.</div>`;
+}
+
 // ----- excel -----
 function scrExcel() {
   return h`${back('#/settings', 'Excel workbook')}
@@ -985,6 +1022,7 @@ function screen() {
     case 'excel': return scrExcel();
     case 'reports': return scrReports();
     case 'setup': return scrSetup();
+    case 'health': return scrHealth();
     default: return scrUpcoming();
   }
 }
@@ -1002,7 +1040,7 @@ function render() {
     console.error(e);
     app.innerHTML = h`<div class="banner red">Something went wrong showing this screen: ${e.message}</div><a class="btn" href="#/">Back to Upcoming</a>`.toString();
   }
-  document.getElementById('tabs').innerHTML = noTabs ? '' : TABS.map(([href, label, ic]) => h`<a href="${href}" ${tab === href || (href === '#/bills' && ['bill', 'edit'].includes(S.route.split('/')[0])) || (href === '#/settings' && ['pay', 'transfers', 'accounts', 'types', 'properties', 'others', 'checkpay', 'alerts', 'sync', 'excel', 'activity'].includes(S.route.split('/')[0])) ? raw('aria-current="page"') : ''}>${icon(ic)}${label}</a>`).join('');
+  document.getElementById('tabs').innerHTML = noTabs ? '' : TABS.map(([href, label, ic]) => h`<a href="${href}" ${tab === href || (href === '#/bills' && ['bill', 'edit'].includes(S.route.split('/')[0])) || (href === '#/settings' && ['pay', 'transfers', 'accounts', 'types', 'properties', 'others', 'checkpay', 'alerts', 'sync', 'excel', 'activity', 'health'].includes(S.route.split('/')[0])) ? raw('aria-current="page"') : ''}>${icon(ic)}${label}</a>`).join('');
   document.getElementById('tabs').hidden = noTabs;
   app.querySelectorAll('form[data-form="bill"]').forEach((f) => { const dr = getDraft(f.dataset.id); if (dr) applyDraft(f, dr); updateShows(f); });
   if (keepScroll) window.scrollTo(0, y); else window.scrollTo(0, 0);
@@ -1508,6 +1546,6 @@ async function start() {
   if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('./sw.js', { scope: './' }).catch(() => {});
   onRoute();
   if (S.dev.github) { S.sync = 'off'; doSync(); setInterval(() => { if (document.visibilityState === 'visible') doSync(); }, 5 * 60 * 1000); }
-  if (DB.isOn(S.dev)) { queueDbx(1500); setInterval(() => { if (document.visibilityState === 'visible') doDbx(); }, 10 * 60 * 1000); }
+  if (DB.isOn(S.dev)) { if (!S.dev.github && S.doc) relinkGithub(); queueDbx(1500); setInterval(() => { if (document.visibilityState === 'visible') doDbx(); }, 10 * 60 * 1000); }
 }
 start();

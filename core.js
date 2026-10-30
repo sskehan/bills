@@ -333,6 +333,64 @@ export function followUps(doc, today) {
 // tab 11 treats a review as current while today <= next review date
 function reviewCurrentStrict(bill, today) { const r = reviewInfo(bill, today); return r.status === 'ok' || r.status === 'soon'; }
 
+// ---------- "Check my bills": everything that could make a bill, a total or an alert wrong ----------
+// Returns [{ level: 'red' | 'amber', bill?, text }] — red = an alert or total is wrong now, amber = worth a look.
+export function healthCheck(doc, today) {
+  const out = [];
+  const live = liveBills(doc);
+  const active = live.filter((b) => b.status === 'active');
+  const accounts = new Map((doc.accounts || []).map((a) => [a.id, a]));
+  // 1. ticks recorded on a date the bill no longer falls on (e.g. after its due date was changed)
+  for (const p of doc.payments || []) {
+    if (p.del) continue;
+    const b = byId(doc.bills, p.billId);
+    if (!b || b.status !== 'active' || !isISO(p.due)) continue;
+    if (!occurrences(b, p.due, p.due).length) {
+      const near = occurrences(b, addDays(p.due, -20), addDays(p.due, 20)).find((x) => payState(doc, b, x, today) !== 'paid' || x >= today);
+      out.push({ level: near && near <= addDays(today, 30) ? 'red' : 'amber', bill: b, text: (p.status === 'missed' ? '"Didn’t come out" was' : 'A payment was') + ' recorded for ' + fmtDate(p.due, { year: true }) + ', but the bill no longer falls on that date' + (near ? ' (it’s now due ' + fmtDate(near) + ')' : '') + '. Open it and tick the right date.' });
+    }
+  }
+  for (const b of live) {
+    if (b.status === 'stopped') continue;
+    const nd = nextDue(b, today);
+    // 2. can't work out dates or amounts
+    if (b.status === 'active') {
+      if (!isISO(b.refDate) || !FREQS.includes(b.freq)) out.push({ level: 'red', bill: b, text: 'No usable due date or frequency, so it never shows as due and never alerts.' });
+      else if (!nd && !isOneOff(b) && !(isISO(b.endDate) && b.endDate < today)) out.push({ level: 'red', bill: b, text: 'No upcoming due date — check its Started and Ends on dates.' });
+      if (isISO(b.endDate) && b.endDate < today) out.push({ level: 'amber', bill: b, text: 'Ended ' + fmtDate(b.endDate, { year: true }) + ' — tap Stop this bill to file it away.' });
+      const a = nd ? amountOn(b, nd, doc) : baseAmountOn(b, today);
+      if (a === null) out.push({ level: 'red', bill: b, text: 'No amount, so it adds $0 to totals and alerts.' });
+      else if (a === 0 && b.amountMode !== 'percentPay') out.push({ level: 'amber', bill: b, text: 'Amount is $0 — confirm or remove it.' });
+    }
+    if (b.status === 'pending') out.push({ level: 'amber', bill: b, text: 'Not started yet — no reminders until you add the details and switch it on.' });
+    // 3. where the money comes from
+    if (b.status === 'active' && b.payMethod !== 'rent' && b.kind !== 'reminder') {
+      const acc = b.accountId ? accounts.get(b.accountId) : null;
+      if (!b.accountId) out.push({ level: 'amber', bill: b, text: 'No “Paid from” account, so it’s missing from “Needed in each account”.' });
+      else if (!acc || acc.del || acc.active === false) out.push({ level: 'red', bill: b, text: 'Paid from an account you’ve removed (' + (acc ? acc.name : 'unknown') + ').' });
+      if (b.transferDayBefore && b.payMethod === 'manual') out.push({ level: 'amber', bill: b, text: 'Has a day-before savings transfer but is set to “I pay it” — check how it’s paid.' });
+    }
+    // 4. not paid / didn't come out
+    if (b.status === 'active') {
+      for (const dd of occurrences(b, addDays(today, -60), addDays(today, -1))) {
+        const st = payState(doc, b, dd, today);
+        if (st === 'overdue') out.push({ level: 'red', bill: b, text: 'Not ticked as paid — was due ' + fmtDate(dd, { year: true }) + '. If you’ve paid it, tick it (you can set the date it was paid).' });
+        if (st === 'missed') out.push({ level: 'red', bill: b, text: 'Marked “didn’t come out” on ' + fmtDate(dd, { year: true }) + ' — sort it, then undo the flag on the bill.' });
+      }
+    }
+  }
+  // 5. the same bill entered twice
+  const seen = new Map();
+  for (const b of live.filter((x) => x.status !== 'stopped')) {
+    const k = (b.name || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    if (seen.has(k)) out.push({ level: 'amber', bill: b, text: 'Same name as another bill — is it in twice?' }); else seen.set(k, b);
+  }
+  // 6. payday
+  if (!(doc.settings && doc.settings.payday && isISO(doc.settings.payday.base))) out.push({ level: 'amber', text: 'Payday isn’t set, so the pay-fortnight figures are blank.' });
+  if (!(doc.settings && doc.settings.ntfy && doc.settings.ntfy.topic)) out.push({ level: 'red', text: 'No alert topic — the 7 am job has nowhere to send alerts.' });
+  return out.sort((a, b) => (a.level === b.level ? 0 : a.level === 'red' ? -1 : 1));
+}
+
 // ---------- reports ----------
 export function fyStart(iso) { const [y, m] = iso.split('-').map(Number); return (m >= 7 ? y : y - 1) + '-07-01'; }
 export function periodRange(kind, anchor, doc) {

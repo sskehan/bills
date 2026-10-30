@@ -105,7 +105,20 @@ export function client(dev, save, fetchFn = (...a) => fetch(...a)) {
   };
 }
 
-const fileText = (env) => JSON.stringify({ ...env, kind: 'bills-backup', savedAt: new Date().toISOString() });
+// The GitHub connection (repo + access key) rides along in the Dropbox copy, locked
+// with the same passphrase, so getting your bills back from Dropbox reconnects GitHub too.
+// It is never put in the bills themselves, so it never goes to GitHub or the other phone.
+async function linkEnv(dev, salt) {
+  if (!dev.github || !dev.github.token) return null;
+  return lock({ github: { owner: dev.github.owner, repo: dev.github.repo, token: dev.github.token } }, dev.passphrase, salt);
+}
+const linkId = (dev) => (dev.github && dev.github.token ? dev.github.owner + '/' + dev.github.repo + '/' + dev.github.token.slice(-6) : '');
+const fileText = (env, link) => JSON.stringify({ ...env, ...(link ? { link } : {}), kind: 'bills-backup', savedAt: new Date().toISOString() });
+// Read the GitHub connection back out of a Dropbox file (null if there isn't one).
+export async function readLink(fileEnv, passphrase) {
+  if (!fileEnv || !fileEnv.link) return null;
+  try { const j = await unlock(fileEnv.link, passphrase); return j && j.github && j.github.token ? j.github : null; } catch { return null; }
+}
 
 // Is there a copy in Dropbox, and does this passphrase open it?
 export async function peek(cl, passphrase) {
@@ -125,7 +138,7 @@ export async function syncDoc(doc, dev, save, cl) {
     const rm = await cl.meta(LIVE);
     let merged = doc, salt = d.salt || dev.salt || null;
     if (rm) {
-      if (rm.rev === d.rev && (doc.updatedAt || 0) <= (d.sentUpdatedAt || 0)) {
+      if (rm.rev === d.rev && (doc.updatedAt || 0) <= (d.sentUpdatedAt || 0) && (d.linkId || '') === linkId(dev)) {
         d.lastSync = Date.now(); d.error = null; await save();
         return { doc, status: 'in-sync' };
       }
@@ -133,7 +146,7 @@ export async function syncDoc(doc, dev, save, cl) {
       salt = env.salt;
       const theirs = await unlock(env, dev.passphrase);
       merged = mergeDocs(theirs, doc);
-      if (canon(theirs) === canon(merged)) {
+      if (canon(theirs) === canon(merged) && (d.linkId || '') === linkId(dev)) {
         Object.assign(d, { rev: rm.rev, salt, sentUpdatedAt: merged.updatedAt || 0, lastSync: Date.now(), error: null }); await save();
         return { doc: merged, status: 'in-sync' };
       }
@@ -141,8 +154,8 @@ export async function syncDoc(doc, dev, save, cl) {
     if (!salt) salt = newSalt();
     const env = await lock(merged, dev.passphrase, salt);
     try {
-      const res = await cl.upload(LIVE, fileText(env), rm ? { '.tag': 'update', update: rm.rev } : { '.tag': 'add' });
-      Object.assign(d, { rev: res.rev, salt, sentUpdatedAt: merged.updatedAt || 0, lastSync: Date.now(), error: null }); await save();
+      const res = await cl.upload(LIVE, fileText(env, await linkEnv(dev, salt)), rm ? { '.tag': 'update', update: rm.rev } : { '.tag': 'add' });
+      Object.assign(d, { rev: res.rev, salt, sentUpdatedAt: merged.updatedAt || 0, lastSync: Date.now(), error: null, linkId: linkId(dev) }); await save();
       return { doc: merged, status: 'pushed' };
     } catch (e) { if (isConflict(e)) continue; throw e; } // the other phone saved at the same moment: merge again
   }
@@ -156,7 +169,7 @@ export function snapName(kind, when = new Date()) {
 export function snapDate(name) { const m = /bills-(\d{4}-\d{2}-\d{2})/.exec(name); return m ? m[1] : null; }
 export async function snapshot(doc, dev, save, cl, kind = '') {
   const env = await lock(doc, dev.passphrase, dev.dbx.salt || dev.salt || undefined);
-  await cl.upload(snapName(kind), fileText(env), 'overwrite');
+  await cl.upload(snapName(kind), fileText(env, await linkEnv(dev, dev.dbx.salt || dev.salt || undefined)), 'overwrite');
   if (!kind) { dev.dbx.lastSnapDay = ymdLocal(); await save(); }
   await prune(cl).catch(() => {});
 }
