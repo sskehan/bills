@@ -34,13 +34,13 @@ export function emptyDoc() {
       reminders: { time: '07:00', eveningTime: '18:00', digestDays: 3, lumpDays: [14], reviewDays: 45, weekly: true, transferCheck: true },
       ntfy: { server: 'https://ntfy.sh', topic: '' }, payCheckPending: [] },
     accounts: [], types: [
-      { id: 't_household', name: 'Household', color: '#2a78d6', order: 1, u: now },
-      { id: 't_vehicle', name: 'Vehicle', color: '#eb6834', order: 2, u: now },
-      { id: 't_insurance', name: 'Insurance', color: '#1baf7a', order: 3, u: now },
-      { id: 't_children', name: 'Children', color: '#eda100', order: 4, u: now },
-      { id: 't_work', name: 'Work', color: '#e87ba4', order: 5, u: now },
-      { id: 't_home', name: 'Home loan', color: '#008300', order: 6, u: now },
-      { id: 't_invest', name: 'Investment property', color: '#6250d6', order: 8, u: now }],
+      { id: 't_household', name: 'Household', color: '#4C7A9A', order: 1, u: now },
+      { id: 't_vehicle', name: 'Vehicle', color: '#B4643C', order: 2, u: now },
+      { id: 't_insurance', name: 'Insurance', color: '#3E8C6D', order: 3, u: now },
+      { id: 't_children', name: 'Children', color: '#BF9330', order: 4, u: now },
+      { id: 't_work', name: 'Work', color: '#94607F', order: 5, u: now },
+      { id: 't_home', name: 'Home loan', color: '#5E7A3A', order: 6, u: now },
+      { id: 't_invest', name: 'Investment property', color: '#6559B8', order: 8, u: now }],
     properties: [], bills: [], payments: [], people: [], others: [], payOverrides: [], transferChecks: {}, activity: [],
   };
 }

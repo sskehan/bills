@@ -213,8 +213,8 @@ export function byId(list, id) { return (list || []).find((x) => x.id === id && 
 export function accountName(doc, id) { const a = byId(doc.accounts, id); return a ? a.name : 'No account set'; }
 export function typeOf(doc, bill) { return byId(doc.types, bill.typeId); }
 export function typeColor(doc, bill) {
-  if (bill.kind === 'reminder') return '#8A948D';
-  const t = typeOf(doc, bill); return t ? t.color : '#8A948D';
+  if (bill.kind === 'reminder') return '#8C9096';
+  const t = typeOf(doc, bill); return t ? t.color : '#8C9096';
 }
 
 // ---------- schedule helpers ----------
@@ -271,7 +271,7 @@ export function totalsByType(doc, items) {
   for (const i of items) {
     const t = typeOf(doc, i.bill);
     const key = t ? t.id : 'none';
-    const cur = map.get(key) || { type: t, name: t ? t.name : 'Other', color: t ? t.color : '#8A948D', total: 0, count: 0 };
+    const cur = map.get(key) || { type: t, name: t ? t.name : 'Other', color: t ? t.color : '#8C9096', total: 0, count: 0 };
     cur.total += i.amount || 0; cur.count++;
     map.set(key, cur);
   }
@@ -322,7 +322,7 @@ export function followUps(doc, today) {
     for (const td of b.todos || []) if (!td.done && !td.del) { p = Math.min(p, 2); t.push(td.text); }
     if (!nd && !isISO(b.refDate)) { p = Math.min(p, 3); t.push('No due date — add one due date'); }
     if (amt === null) { p = Math.min(p, 3); t.push('No amount yet'); }
-    else if (amt === 0) { p = Math.min(p, 3); t.push('Amount is $0 — confirm or remove'); }
+    else if (amt === 0 && b.amountMode !== 'varies') { p = Math.min(p, 3); t.push('Amount is $0 — confirm or remove'); }
     if (b.expectedChange) { p = Math.min(p, 3); t.push('Expected change: ' + b.expectedChange); }
     if (b.kind !== 'reminder' && !b.provider) { p = Math.min(p, 3); t.push('Provider missing'); }
     if (t.length) out.push({ bill: b, p, text: t.join(' · '), next: nd, days });
@@ -360,7 +360,7 @@ export function healthCheck(doc, today) {
       if (isISO(b.endDate) && b.endDate < today) out.push({ level: 'amber', bill: b, text: 'Ended ' + fmtDate(b.endDate, { year: true }) + ' — tap Stop this bill to file it away.' });
       const a = nd ? amountOn(b, nd, doc) : baseAmountOn(b, today);
       if (a === null) out.push({ level: 'red', bill: b, text: 'No amount, so it adds $0 to totals and alerts.' });
-      else if (a === 0 && b.amountMode !== 'percentPay') out.push({ level: 'amber', bill: b, text: 'Amount is $0 — confirm or remove it.' });
+      else if (a === 0 && b.amountMode !== 'percentPay' && b.amountMode !== 'varies') out.push({ level: 'amber', bill: b, text: 'Amount is $0 — confirm or remove it.' });
     }
     if (b.status === 'pending') out.push({ level: 'amber', bill: b, text: 'Not started yet — no reminders until you add the details and switch it on.' });
     // 3. where the money comes from

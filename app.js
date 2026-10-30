@@ -4,10 +4,10 @@ import * as St from './store.js';
 import { makeSetupCode, readSetupCode, unlock } from './crypto.js';
 import * as DB from './dropbox.js';
 
-const APP_VERSION = '1.4';
+const APP_VERSION = '1.41';
 import { h, raw, esc, icon, toast, openSheet, closeSheet, confirmSheet, download, pickFile, copyText } from './ui.js';
 
-const PALETTE = [['#2a78d6', 'Blue'], ['#eb6834', 'Orange'], ['#1baf7a', 'Aqua'], ['#eda100', 'Yellow'], ['#e87ba4', 'Pink'], ['#008300', 'Green'], ['#6250d6', 'Violet'], ['#e34948', 'Red'], ['#8A948D', 'Grey']];
+const PALETTE = [['#4C7A9A', 'Steel blue'], ['#B4643C', 'Copper'], ['#3E8C6D', 'Teal'], ['#BF9330', 'Ochre'], ['#94607F', 'Plum'], ['#5E7A3A', 'Olive'], ['#6559B8', 'Indigo'], ['#B5524A', 'Brick'], ['#8C9096', 'Grey']];
 const S = { doc: null, dev: null, route: '', params: [], ui: { range: 7, open: {}, q: '', rKind: 'fy', rInv: false, rTable: false, rSel: null, calSel: null, calMonth: null }, sync: 'off', syncErr: '', dbx: 'off', dbxErr: '' };
 const $app = () => document.getElementById('app');
 const tz = () => (S.doc && S.doc.settings && S.doc.settings.timezone) || 'Australia/Sydney';
@@ -23,7 +23,7 @@ async function commit(text, fn) {
   fn(S.doc);
   S.doc.updatedAt = Date.now();
   if (text) { S.doc.activity = S.doc.activity || []; S.doc.activity.unshift({ id: C.uid('ac'), at: Date.now(), u: Date.now(), by: who(), text }); S.doc.activity = S.doc.activity.slice(0, 400); }
-  await St.saveLocal(S.doc);
+  await saveDoc(S.doc);
   render();
   queueSync();
   queueDbx();
@@ -40,7 +40,7 @@ async function doSync(manual) {
     const r = await St.sync(S.doc, S.dev, 'Update');
     // Changes made while syncing win over the copy that was being synced.
     if (rev !== startRev) { S.doc = C.mergeDocs(r.doc, S.doc); queueSync(1000); } else S.doc = r.doc;
-    await St.saveLocal(S.doc); await St.saveDevice(S.dev);
+    await saveDoc(S.doc); await St.saveDevice(S.dev);
     S.sync = 'ok'; S.syncErr = '';
     if (St.canon(S.doc) !== before) { if (!editing()) render(); else renderStatusOnly(); queueDbx(1000); } else renderStatusOnly();
     if (manual) toast(r.status === 'pushed' ? 'Saved to GitHub' : 'Up to date');
@@ -62,7 +62,7 @@ async function doDbx(manual) {
     const cl = dbxClient(), before = St.canon(S.doc), startRev = rev;
     const r = await DB.syncDoc(S.doc, S.dev, saveDev, cl);
     if (rev !== startRev) { S.doc = C.mergeDocs(r.doc, S.doc); queueDbx(1000); } else S.doc = r.doc;
-    await St.saveLocal(S.doc);
+    await saveDoc(S.doc);
     S.dbx = 'ok'; S.dbxErr = '';
     if (St.canon(S.doc) !== before) { if (!editing()) render(); else renderStatusOnly(); queueSync(1000); } else renderStatusOnly();
     DB.maybeSnapshot(S.doc, S.dev, saveDev, cl).catch(() => {});
@@ -166,7 +166,7 @@ async function replaceDoc(old, label) {
 function renderStatusOnly() { const el = document.getElementById('syncdot'); if (el) el.outerHTML = syncDot().toString(); }
 function syncDot() {
   if (!S.dev || !S.dev.github) return h`<span id="syncdot"></span>`;
-  const map = { ok: ['#1B6B3A', 'Synced'], syncing: ['#D08A1E', 'Syncing…'], error: ['#B3261E', 'Sync problem'], off: ['#8A948D', 'Not synced yet'] };
+  const map = { ok: ['#1B7048', 'Synced'], syncing: ['#B9822A', 'Syncing…'], error: ['#B3261E', 'Sync problem'], off: ['#8C9096', 'Not synced yet'] };
   const [c, t] = map[S.sync] || map.off;
   return h`<a id="syncdot" href="#/sync" class="xs muted row" style="gap:6px"><span class="dot" style="background:${c};border-radius:5px"></span>${t}</a>`;
 }
@@ -218,6 +218,17 @@ function applyDraft(form, dr) {
   if (incl && dr.inclAuto) incl.dataset.inclAuto = dr.inclAuto;
   const amt = form.querySelector('[name=amount]'), af = document.getElementById('amtfrom');
   if (amt && af && amt.dataset.cur !== undefined) af.hidden = amt.value === '' || Number(amt.value) === Number(amt.dataset.cur);
+}
+
+// 1.41: bill-type colours move to the graphite & emerald palette (only colours still on the old defaults change).
+// Runs on every copy that arrives (start, import, restore, join, sync), so the other phone's older copy follows too.
+const OLD_TYPE_COLOURS = { '#2a78d6': '#4C7A9A', '#eb6834': '#B4643C', '#1baf7a': '#3E8C6D', '#eda100': '#BF9330', '#e87ba4': '#94607F', '#008300': '#5E7A3A', '#6250d6': '#6559B8', '#e34948': '#B5524A', '#8a948d': '#8C9096' };
+function saveDoc(d) { recolourTypes(d); return St.saveLocal(d); }
+function recolourTypes(d) {
+  let n = 0;
+  for (const ty of (d && d.types) || []) { const nc = OLD_TYPE_COLOURS[(ty.color || '').toLowerCase()]; if (nc) { ty.color = nc; ty.u = Date.now(); n++; } }
+  if (n) d.updatedAt = Date.now();
+  return n > 0;
 }
 
 // ---------- small builders ----------
@@ -280,9 +291,9 @@ function scrUpcoming() {
   ${pending ? h`<a class="banner amber row" href="#/checkpay" style="color:inherit">${icon('warn', 20)}<span class="grow">Confirm how <b>${pending}</b> imported bills are paid (direct debit or you pay them).</span>${icon('next', 18)}</a>` : ''}
   <section class="hero" aria-label="Summary">
     <div class="seg" role="group" aria-label="Range"><button data-act="range" data-v="7" aria-pressed="${range === 7}">Next 7 days</button><button data-act="range" data-v="30" aria-pressed="${range === 30}">Next 30 days</button></div>
-    <div class="stack" style="gap:2px"><div class="sub" style="color:#B9D3CC;font-size:13px">Household bills due in the next ${range} days</div><div class="big">${C.money(total)}</div>
+    <div class="stack" style="gap:2px"><div class="sub" style="color:#A7AEB4;font-size:13px">Household bills due in the next ${range} days</div><div class="big">${C.money(total)}</div>
     <div class="sub">${hh.length} payment${hh.length === 1 ? '' : 's'}${nextPay ? ' · next payday ' + C.fmtDate(nextPay) : ''}</div></div>
-    ${byAcc.size ? h`<hr><div class="xs" style="font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:#9FC3BA">Needed in each account (all bills)</div>
+    ${byAcc.size ? h`<hr><div class="xs" style="font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:#9AA2A8">Needed in each account (all bills)</div>
     ${[...byAcc.entries()].map(([id, v]) => h`<div class="between" style="font-size:15px"><span>${C.accountName(d, id)}</span><span class="mono">${C.money(v)}</span></div>`)}` : ''}
   </section>
   ${trs.map((tr) => h`<div class="card pad row">${raw('<span class="icon-btn" style="width:40px;height:40px;background:var(--brand-soft);color:var(--brand);border:0">')}${icon('swap', 18)}${raw('</span>')}
@@ -349,13 +360,13 @@ function scrCalendar() {
     <div class="between small muted"><span>${hh.length} household payments</span><span>Average month ${C.money(annual / 12)}</span></div>
     ${Object.keys(exGroups).length ? h`<div class="xs" style="color:var(--inv-ink)">Not included: ${Object.entries(exGroups).map(([k, v]) => k + ' ' + C.money(v)).join(' · ')}</div>` : ''}
     <div class="cal" style="margin-top:6px">${['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((x) => h`<span class="h">${x}</span>`)}${cells}</div>
-    <div class="row wrap xs muted" style="gap:6px 14px"><span class="row" style="gap:6px"><span class="dot" style="background:#E3ECF8"></span>Under $500</span><span class="row" style="gap:6px"><span class="dot" style="background:#B9CFEA"></span>$500–$2,000</span><span class="row" style="gap:6px"><span class="dot" style="background:#7EA6D6"></span>Over $2,000</span><span><b style="color:var(--brand)">PAY</b> payday</span></div>
+    <div class="row wrap xs muted" style="gap:6px 14px"><span class="row" style="gap:6px"><span class="dot" style="background:#E3F2EC"></span>Under $500</span><span class="row" style="gap:6px"><span class="dot" style="background:#A9D9C5"></span>$500–$2,000</span><span class="row" style="gap:6px"><span class="dot" style="background:#6DB597"></span>Over $2,000</span><span><b style="color:var(--brand)">PAY</b> payday</span></div>
   </div>
   <div class="stack" style="gap:6px"><div class="between" style="padding:0 2px"><h3>${C.fmtDate(sel)}${pds.has(sel) ? ' · payday' : ''}</h3><span class="mono small muted">${dayItems.length ? C.money(C.sumAmounts(dayItems.filter((i) => C.inTotals(i.bill)))) : ''}</span></div>
     <div class="card list">${dayItems.length ? dayItems.map((i) => billRow(i, { sub: [i.group === 'investment' ? 'Investment · not in totals' : i.group === 'reminder' ? 'Reminder only' : i.group === 'excluded' ? 'Not counted' : C.accountName(d, i.bill.accountId), i.bill.freq].join(' · ') })) : h`<div class="empty">No bills due this day.</div>`}</div></div>
   ${periods.length ? h`<div class="card pad stack" style="gap:14px"><div class="stack" style="gap:2px"><h3>Between paydays</h3><span class="small muted">Household bills each fortnight's pay has to cover</span></div>
     ${periods.map((x) => h`<div class="stack" style="gap:6px"><div class="between small"><b style="font-weight:500">Pay ${C.fmtDate(x.p)} → ${C.fmtDate(x.e)}</b><span class="mono" style="font-weight:600">${C.money(x.bills)}</span></div>
-    <div class="bar"><span style="width:${(x.bills / maxB * 100).toFixed(0)}%;background:#1E4E8C"></span></div>
+    <div class="bar"><span style="width:${(x.bills / maxB * 100).toFixed(0)}%;background:#2F5D86"></span></div>
     ${x.pay !== null ? h`<div class="xs ${x.pay - x.bills < 0 ? '' : 'muted'}" style="${x.pay - x.bills < 0 ? 'color:var(--red-ink)' : ''}">Pay in ${C.money(x.pay)} · left over ${C.money(x.pay - x.bills)}</div>` : h`<div class="xs muted">Add your pays on the Pay screen to see what's left over.</div>`}</div>`)}</div>` : h`<a class="card pad small" href="#/pay">Set your payday to see the fortnights →</a>`}`;
 }
 function payIn(payday) {
@@ -388,7 +399,7 @@ function scrBills() {
     sections.push(groupCard('t:' + ty.id, ty.name, ty.color, list));
   }
   const untyped = hhCounted.filter((b) => !C.byId(d.types, b.typeId));
-  sections.push(groupCard('t:none', 'No type', '#8A948D', untyped));
+  sections.push(groupCard('t:none', 'No type', '#8C9096', untyped));
   const notCounted = active.filter((b) => b.kind === 'household' && !C.inTotals(b) && !C.isOneOff(b));
   const invest = active.filter((b) => b.kind === 'investment' && !C.inTotals(b) && !C.isOneOff(b));
   const props = (d.properties || []).filter((p) => !p.del);
@@ -402,15 +413,15 @@ function scrBills() {
   <div class="grid3"><div class="tile"><span class="k">A year</span><span class="v" style="font-size:15px">${C.money(annual, 0)}</span></div><div class="tile"><span class="k">A month</span><span class="v" style="font-size:15px">${C.money(annual / 12, 0)}</span></div><div class="tile"><span class="k">Per payday</span><span class="v" style="font-size:15px">${C.money(annual / 26, 0)}</span></div></div>
   <div class="eyebrow">Household bills · ${hhCounted.length} counted in totals</div>
   ${sections}
-  ${notCounted.length ? h`<div class="eyebrow">Not counted in totals</div>${groupCard('nc', 'Not counted', '#8A948D', notCounted, notCounted.length + ' · still reminded and shown, left out of totals')}` : ''}
-  ${invest.length || props.length ? h`<div class="stack" style="gap:4px;padding:8px 2px 0"><div class="eyebrow" style="color:var(--inv-ink);padding:0">Investment properties</div><div class="small" style="color:#4A5068">Still reminded, but <b>not included in any household totals</b>.</div><a href="#/properties" class="small" style="font-weight:600;color:var(--inv-ink);padding:4px 0">Rent, costs & net per property →</a></div>
-    ${props.map((p) => groupCard('p:' + p.id, p.name, '#6250d6', invest.filter((b) => b.propertyId === p.id), null, 'inv'))}
-    ${groupCard('p:none', 'Across the portfolio', '#6250d6', invest.filter((b) => !C.byId(d.properties, b.propertyId)), null, 'inv')}` : ''}
-  ${reminders.length ? h`<div class="eyebrow">Reminders only · paying for others</div>${(d.others || []).filter((o) => !o.del).map((o) => groupCard('o:' + o.id, o.name, '#8A948D', reminders.filter((b) => b.forWhom === o.id), null, 'dashed'))}${groupCard('o:none', 'Others', '#8A948D', reminders.filter((b) => !C.byId(d.others, b.forWhom)), null, 'dashed')}` : ''}
-  ${oneOffOpen.length ? h`<div class="eyebrow">One-off bills</div>${groupCard('oo', 'One-off bills — coming up', '#8A948D', oneOffOpen, oneOffOpen.length + ' · paid once, not in the yearly figures above')}` : ''}
-  ${oneOffDone.length ? h`${!oneOffOpen.length ? h`<div class="eyebrow">One-off bills</div>` : ''}${groupCard('ood', 'One-off bills — done', '#8A948D', oneOffDone, oneOffDone.length + ' · paid · kept for reports', 'dashed')}` : ''}
-  ${pending.length ? h`<div class="eyebrow">Not started yet</div>${groupCard('pending', 'Waiting for details', '#8A948D', pending, pending.length + ' · no reminders until you add the details')}` : ''}
-  ${stopped.length ? h`<div class="eyebrow">Stopped</div>${groupCard('stopped', 'Stopped bills', '#8A948D', stopped, stopped.length + ' · history kept · restore any time')}` : h`<div class="card dashed pad between"><span class="stack" style="gap:2px"><b>Stopped bills</b><span class="small muted">Cancelled or switched bills keep their history here.</span></span><span class="mono muted">0</span></div>`}`;
+  ${notCounted.length ? h`<div class="eyebrow">Not counted in totals</div>${groupCard('nc', 'Not counted', '#8C9096', notCounted, notCounted.length + ' · still reminded and shown, left out of totals')}` : ''}
+  ${invest.length || props.length ? h`<div class="stack" style="gap:4px;padding:8px 2px 0"><div class="eyebrow" style="color:var(--inv-ink);padding:0">Investment properties</div><div class="small" style="color:#4E4A6E">Still reminded, but <b>not included in any household totals</b>.</div><a href="#/properties" class="small" style="font-weight:600;color:var(--inv-ink);padding:4px 0">Rent, costs & net per property →</a></div>
+    ${props.map((p) => groupCard('p:' + p.id, p.name, '#6559B8', invest.filter((b) => b.propertyId === p.id), null, 'inv'))}
+    ${groupCard('p:none', 'Across the portfolio', '#6559B8', invest.filter((b) => !C.byId(d.properties, b.propertyId)), null, 'inv')}` : ''}
+  ${reminders.length ? h`<div class="eyebrow">Reminders only · paying for others</div>${(d.others || []).filter((o) => !o.del).map((o) => groupCard('o:' + o.id, o.name, '#8C9096', reminders.filter((b) => b.forWhom === o.id), null, 'dashed'))}${groupCard('o:none', 'Others', '#8C9096', reminders.filter((b) => !C.byId(d.others, b.forWhom)), null, 'dashed')}` : ''}
+  ${oneOffOpen.length ? h`<div class="eyebrow">One-off bills</div>${groupCard('oo', 'One-off bills — coming up', '#8C9096', oneOffOpen, oneOffOpen.length + ' · paid once, not in the yearly figures above')}` : ''}
+  ${oneOffDone.length ? h`${!oneOffOpen.length ? h`<div class="eyebrow">One-off bills</div>` : ''}${groupCard('ood', 'One-off bills — done', '#8C9096', oneOffDone, oneOffDone.length + ' · paid · kept for reports', 'dashed')}` : ''}
+  ${pending.length ? h`<div class="eyebrow">Not started yet</div>${groupCard('pending', 'Waiting for details', '#8C9096', pending, pending.length + ' · no reminders until you add the details')}` : ''}
+  ${stopped.length ? h`<div class="eyebrow">Stopped</div>${groupCard('stopped', 'Stopped bills', '#8C9096', stopped, stopped.length + ' · history kept · restore any time')}` : h`<div class="card dashed pad between"><span class="stack" style="gap:2px"><b>Stopped bills</b><span class="small muted">Cancelled or switched bills keep their history here.</span></span><span class="mono muted">0</span></div>`}`;
 }
 function registerRow(b) {
   const d = doc(), t = today();
@@ -433,7 +444,7 @@ function scrReviews() {
   return h`${head('Reviews')}
   <div class="small" style="color:var(--ink2);line-height:1.45;margin-top:-8px">Once a year, check each reviewable bill is still the best deal. Tick it here when you have.</div>
   <div class="card pad stack" style="gap:14px"><div class="row" style="gap:8px;align-items:baseline"><span class="mono" style="font-size:34px;font-weight:600">${up + soon}</span><span class="muted">of ${list.length} reviewed in the last 12 months</span></div>
-    <div class="bar" style="height:12px;display:flex"><span style="width:${pctUp}%;background:#1B6B3A;border-radius:0;height:12px"></span><span style="width:${pctSoon}%;background:#D08A1E;border-radius:0;height:12px"></span></div>
+    <div class="bar" style="height:12px;display:flex"><span style="width:${pctUp}%;background:#1B7048;border-radius:0;height:12px"></span><span style="width:${pctSoon}%;background:#B9822A;border-radius:0;height:12px"></span></div>
     <div class="grid2"><div class="tile" style="background:var(--green-soft);border:0"><span class="k" style="color:var(--green-ink);font-weight:600">Up to date</span><span class="v">${up}</span></div><div class="tile" style="background:var(--amber-soft);border:0"><span class="k" style="color:var(--amber-ink);font-weight:600">Due soon (≤ 30 days)</span><span class="v">${soon}</span></div>
     <div class="tile" style="background:var(--red-soft);border:0"><span class="k" style="color:var(--red-ink);font-weight:600">Overdue</span><span class="v">${over}</span></div><div class="tile" style="background:var(--red-soft);border:0"><span class="k" style="color:var(--red-ink);font-weight:600">Never reviewed</span><span class="v">${never}</span></div></div>
     <div class="small muted">${na} other bills don't need reviewing. Turn reviewing on in a bill's edit screen.</div></div>
@@ -483,14 +494,17 @@ function scrBill(id) {
   const st = nd ? C.payState(d, b, nd, t) : null;
   const rv = C.reviewInfo(b, t);
   const fu = C.followUps(d, t).find((f) => f.bill.id === b.id);
-  const past = C.occurrences(b, C.addDays(t, -400), C.addDays(t, -1)).slice(-6).reverse();
-  const overdue = past.filter((dd) => C.payState(d, b, dd, t) === 'overdue');
+  const pastOnly = C.occurrences(b, C.addDays(t, -400), C.addDays(t, -1)).slice(-6).reverse();
+  // payments already made for dates still to come (paid early or scheduled) go at the top
+  const ahead = C.occurrences(b, t, C.addDays(t, 400)).filter((dd) => { const p = C.paymentFor(d, b.id, dd); return p && p.status !== 'missed'; }).reverse();
+  const past = ahead.concat(pastOnly);
+  const overdue = pastOnly.filter((dd) => C.payState(d, b, dd, t) === 'overdue');
   const ty = C.typeOf(d, b);
   const hist = C.priceHistory(b);
   const maxH = Math.max(1, ...hist.map((x) => x.amount));
   const kindLabel = b.kind === 'investment' ? 'Investment' + (propName(b) ? ' · ' + propName(b) : '') : b.kind === 'reminder' ? 'Reminder only · ' + (byIdName(d.others, b.forWhom) || 'someone else') : (ty ? ty.name : 'Household');
   const payLabel = { dd: 'Direct debit · ticks itself', manual: 'You pay it' + (b.bpay && b.bpay.biller ? ' · BPAY ' + b.bpay.biller + (b.bpay.ref ? ' / ' + b.bpay.ref : '') : ''), rent: 'Taken from the rent' }[b.payMethod] || '—';
-  const recentDD = b.payMethod !== 'manual' ? past.find((dd) => C.daysBetween(dd, t) <= 10) : null;
+  const recentDD = b.payMethod !== 'manual' ? pastOnly.find((dd) => C.daysBetween(dd, t) <= 10) : null;
   return h`${back('#/bills', b.name, kindLabel)}
   ${b.status !== 'active' ? h`<div class="banner ${b.status === 'stopped' ? 'red' : 'amber'}">${b.status === 'stopped' ? 'Stopped on ' + C.fmtDate(b.stoppedAt, { year: true }) + '. No more reminders; history kept.' : 'Not started yet — no reminders until you add the details and switch it on.'}</div>` : ''}
   <div class="card pad stack" style="gap:14px">
@@ -504,13 +518,13 @@ function scrBill(id) {
   </div>
   ${C.oneOffDone(d, b, t) ? h`<div class="banner green">This one-off bill is done — no more reminders. It stays in reports and history.</div>` : ''}
   ${fu ? h`<div class="banner ${fu.p === 1 ? 'red' : 'amber'}"><b>${fu.p === 1 ? 'Needs attention' : 'To check'}:</b> ${fu.text}</div>` : ''}
-  ${(b.todos || []).filter((x) => !x.del).length ? h`<div class="card list">${b.todos.filter((x) => !x.del).map((td) => h`<div class="item"><button class="tick ${td.done ? 'on' : ''}" data-act="todo" data-bill="${b.id}" data-id="${td.id}" aria-label="Done">${icon('check', 18, 2.4)}</button><span class="grow t" style="${td.done ? 'text-decoration:line-through;color:#7A848D' : ''}">${td.text}</span></div>`)}</div>` : ''}
+  ${(b.todos || []).filter((x) => !x.del).length ? h`<div class="card list">${b.todos.filter((x) => !x.del).map((td) => h`<div class="item"><button class="tick ${td.done ? 'on' : ''}" data-act="todo" data-bill="${b.id}" data-id="${td.id}" aria-label="Done">${icon('check', 18, 2.4)}</button><span class="grow t" style="${td.done ? 'text-decoration:line-through;color:#6E7378' : ''}">${td.text}</span></div>`)}</div>` : ''}
   ${b.review && b.review.applicable ? h`<div class="card pad stack" style="gap:12px"><div class="between"><h3>Review</h3><span class="pill ${rv.status === 'ok' ? 'green' : rv.status === 'soon' ? 'amber' : 'red'}">${rv.label}</span></div>
     <div class="grid2"><div class="stack" style="gap:2px"><span class="xs muted">Last reviewed</span><b style="font-weight:500">${b.review.last ? C.fmtDate(b.review.last, { year: true, dow: false }) : '—'}</b></div><div class="stack" style="gap:2px"><span class="xs muted">Next review</span><b style="font-weight:500">${rv.next ? C.fmtDate(rv.next, { year: true, dow: false }) : '—'}</b></div></div>
     <button class="btn sec" data-act="review" data-bill="${b.id}">I’ve reviewed it</button>
     ${(b.review.log || []).length ? h`<div class="stack" style="gap:4px">${b.review.log.slice().reverse().slice(0, 5).map((l) => h`<div class="xs muted">${C.fmtDate(l.date, { year: true, dow: false })} · ${l.outcome || 'Reviewed'}${l.note ? ' — ' + l.note : ''} · ${l.by || ''}</div>`)}</div>` : ''}</div>` : ''}
   <div class="card pad stack" style="gap:12px"><div class="between"><h3>Price history</h3><button class="btn small sec" data-act="newamount" data-bill="${b.id}">Change amount</button></div>
-    ${hist.length ? hist.slice().reverse().map((x) => h`<div class="stack" style="gap:4px"><div class="between small"><span>${x.from <= '2000-01-01' ? 'Since tracking began' : 'From ' + C.fmtDate(x.from, { year: true, dow: false })}</span><span><span class="mono" style="font-weight:600">${C.money(x.amount)}</span> ${x.change !== null ? h`<span class="xs" style="font-weight:600;color:${x.change > 0 ? 'var(--red)' : '#1B6B3A'}">${x.change > 0 ? '▲ +' : '▼ '}${x.pct}%</span>` : ''}</span></div><div class="bar"><span style="width:${(x.amount / maxH * 100).toFixed(1)}%;background:${C.typeColor(d, b)}"></span></div>${x.note ? h`<span class="xs muted">${x.note}</span>` : ''}</div>`) : h`<div class="small muted">No amount yet.</div>`}
+    ${hist.length ? hist.slice().reverse().map((x) => h`<div class="stack" style="gap:4px"><div class="between small"><span>${x.from <= '2000-01-01' ? 'Since tracking began' : 'From ' + C.fmtDate(x.from, { year: true, dow: false })}</span><span><span class="mono" style="font-weight:600">${C.money(x.amount)}</span> ${x.change !== null ? h`<span class="xs" style="font-weight:600;color:${x.change > 0 ? 'var(--red)' : '#1B7048'}">${x.change > 0 ? '▲ +' : '▼ '}${x.pct}%</span>` : ''}</span></div><div class="bar"><span style="width:${(x.amount / maxH * 100).toFixed(1)}%;background:${C.typeColor(d, b)}"></span></div>${x.note ? h`<span class="xs muted">${x.note}</span>` : ''}</div>`) : h`<div class="small muted">No amount yet.</div>`}
     <div class="xs muted">Old payments keep the amount that applied then. Reports list every bill that went up or down.</div></div>
   <div class="card" style="padding:4px 16px">
     ${detailRow('How it’s paid', payLabel)}${b.transferDayBefore ? detailRow('Day-before transfer', 'Savings → ' + (b.accountId ? C.accountName(d, b.accountId) : 'personal')) : ''}
@@ -665,7 +679,7 @@ async function saveBillForm(form) {
   const errs = C.validateBill(b, t);
   if (newAmt === null && !pending && b.amountMode !== 'percentPay') errs.push('Add the amount (or tick "Not started yet").');
   if (errs.length) { form.querySelector('#formerr').innerHTML = h`<div class="banner red">${errs.join(' ')}</div>`.toString(); form.querySelector('#formerr').scrollIntoView({ block: 'center' }); return; }
-  if (old && old.accountId !== b.accountId && old.accountId && b.payMethod !== 'manual') {
+  if (old && old.status !== 'pending' && old.accountId !== b.accountId && old.accountId && b.payMethod !== 'manual') {
     b.todos = (b.todos || []).concat([{ id: C.uid('td'), text: 'Tell ' + (b.provider || 'the provider') + ' about the new account (' + C.accountName(d, b.accountId) + ')', done: false }]);
   }
   touch(b);
@@ -700,7 +714,7 @@ function scrPay() {
   <div class="card pad stack"><div class="between"><h3>One-off changes</h3><button class="btn small" data-act="payoverride">Add</button></div><span class="small muted">Overtime, leave loading, unpaid leave — change one payday without touching the usual amount.</span>
     ${ovs.length ? h`<div class="list">${ovs.map((o) => h`<div class="item" style="padding-left:0"><span class="grow stack" style="gap:2px"><span class="t">${byIdName(d.people, o.personId)} · ${C.fmtDate(o.date, { year: true })}</span><span class="s">${o.takeHome !== undefined && o.takeHome !== null ? 'Take-home ' + C.money(o.takeHome) : ''}${o.gross ? ' · gross ' + C.money(o.gross) : ''}${o.note ? ' · ' + o.note : ''}</span></span><button class="btn small ghost" data-act="deloverride" data-id="${o.id}">Remove</button></div>`)}</div>` : h`<div class="card dashed empty">None yet</div>`}</div>
   <div class="stack" style="gap:8px"><h2 style="padding:0 2px">Next three paydays</h2>
-  ${periods.map((x) => h`<div class="card pad stack"><b>${C.fmtDate(x.p)} → ${C.fmtDate(x.e)}</b><div class="grid3"><div class="stack" style="gap:2px"><span class="xs muted">Pay in</span><span class="mono" style="font-weight:600">${x.pay === null ? '—' : C.money(x.pay)}</span></div><div class="stack" style="gap:2px"><span class="xs muted">Household bills</span><span class="mono" style="font-weight:600">${C.money(x.hh)}</span></div><div class="stack" style="gap:2px"><span class="xs muted">Left over</span><span class="mono" style="font-weight:600;color:${x.pay === null ? 'inherit' : x.pay - x.hh < 0 ? 'var(--red)' : '#1B6B3A'}">${x.pay === null ? '—' : C.money(x.pay - x.hh)}</span></div></div>
+  ${periods.map((x) => h`<div class="card pad stack"><b>${C.fmtDate(x.p)} → ${C.fmtDate(x.e)}</b><div class="grid3"><div class="stack" style="gap:2px"><span class="xs muted">Pay in</span><span class="mono" style="font-weight:600">${x.pay === null ? '—' : C.money(x.pay)}</span></div><div class="stack" style="gap:2px"><span class="xs muted">Household bills</span><span class="mono" style="font-weight:600">${C.money(x.hh)}</span></div><div class="stack" style="gap:2px"><span class="xs muted">Left over</span><span class="mono" style="font-weight:600;color:${x.pay === null ? 'inherit' : x.pay - x.hh < 0 ? 'var(--red)' : '#1B7048'}">${x.pay === null ? '—' : C.money(x.pay - x.hh)}</span></div></div>
     <div class="xs" style="color:var(--inv-ink);border-top:1px solid var(--line2);padding-top:8px">${x.n} household payments · investment properties (not counted): ${C.money(x.inv)}</div></div>`)}</div>`;
 }
 
@@ -715,7 +729,7 @@ function scrTransfers() {
   const cur = prev.length ? prev[prev.length - 1] : null;
   const fns = cur ? [0, 1, 2].map((k) => { const p = C.addDays(cur, 14 * k), e = C.addDays(p, 13); return { p, e, v: C.sumAmounts(C.schedule(d, p, e, t, (b) => accIds.includes(b.accountId) && b.status === 'active')) }; }) : [];
   const annual = C.round2(C.liveBills(d).filter((b) => accIds.includes(b.accountId) && b.status === 'active').reduce((a, b) => a + C.annualAmount(b, t, d), 0));
-  const row = (tr) => h`<div class="card row" style="padding:12px 12px 12px 16px"><span class="grow stack" style="gap:3px"><span class="between"><b>${C.fmtDate(tr.date)} · for ${C.fmtDate(C.addDays(tr.date, 1))}</b><span class="mono" style="font-weight:600">${C.money(tr.total)}</span></span><span class="small muted">${tr.items.map((i) => i.bill.name + ' ' + (C.isEstimate(i.bill) ? '≈' : '') + C.money(i.amount)).join(' · ')}</span>${tr.check ? h`<span class="xs" style="color:#1B6B3A">Ticked by ${tr.check.by}</span>` : ''}</span>
+  const row = (tr) => h`<div class="card row" style="padding:12px 12px 12px 16px"><span class="grow stack" style="gap:3px"><span class="between"><b>${C.fmtDate(tr.date)} · for ${C.fmtDate(C.addDays(tr.date, 1))}</b><span class="mono" style="font-weight:600">${C.money(tr.total)}</span></span><span class="small muted">${tr.items.map((i) => i.bill.name + ' ' + (C.isEstimate(i.bill) ? '≈' : '') + C.money(i.amount)).join(' · ')}</span>${tr.check ? h`<span class="xs" style="color:#1B7048">Ticked by ${tr.check.by}</span>` : ''}</span>
     <button class="tick ${tr.check ? 'on' : ''}" data-act="trtick" data-date="${tr.date}" aria-label="Transfer done">${icon('check', 18, 2.4)}</button></div>`;
   return h`${back('#/settings', 'Savings transfers')}
   <div class="row wrap small" style="gap:6px;font-weight:600"><span class="pill grey" style="padding:6px 10px">Revolut savings</span><span class="muted">→ 1 day before →</span><span class="pill grey" style="padding:6px 10px">${accIds.map((x) => C.accountName(d, x)).join(' / ') || 'personal'}</span><span class="muted">→</span><span class="pill grey" style="padding:6px 10px">Direct debit</span></div>
@@ -767,16 +781,16 @@ function scrProperties() {
     const status = p.status === 'sold' ? h`<span class="pill grey">Sold ${C.fmtDate(p.soldAt, { year: true, dow: false })}</span>` : cr ? h`<span class="pill green">Rented</span>` : h`<span class="pill amber">${p.expectedWeekly ? 'Expected ' + C.money(p.expectedWeekly, 0) + '/wk' : 'Not rented'}</span>`;
     return h`<div class="card pad stack" style="gap:12px"><div class="between" style="align-items:flex-start"><span class="stack" style="gap:2px"><h3>${p.name}</h3><span class="small muted">${p.manager ? 'Managed by ' + p.manager : ''}${cr ? ' · ' + C.money(cr.weekly) + ' a week from ' + C.fmtDate(cr.from, { year: true, dow: false }) : ''}</span></span>${status}</div>
       <div class="list">${bills.map((b) => { const nd = C.nextDue(b, t); return h`<a class="item" href="#/bill/${b.id}" style="padding-left:0;min-height:40px"><span class="grow small">${b.name}${b.payMethod === 'rent' ? h` <span class="xs muted">· taken from rent</span>` : b.payMethod === 'manual' ? h` <span class="xs muted">· you pay</span>` : ''}${b.status === 'pending' ? h` <span class="xs muted">· not started</span>` : ''}${b.expectedChange ? h` <span class="xs" style="color:var(--amber-ink)">· ${b.expectedChange.toLowerCase()}</span>` : ''}</span><span class="mono small">${C.money(C.sumAmounts(C.schedule(d, fy.from, fy.to, t, (x) => x.id === b.id)))}</span></a>`; })}</div>
-      <div class="grid3" style="background:var(--inv-soft);border-radius:10px;padding:10px 12px"><div class="stack" style="gap:2px"><span class="xs" style="color:#4A5068">Rent ${fy.label.slice(-7)}</span><span class="mono small" style="font-weight:600">${C.money(rent)}</span></div><div class="stack" style="gap:2px"><span class="xs" style="color:#4A5068">Costs</span><span class="mono small" style="font-weight:600">${C.money(costs)}</span></div><div class="stack" style="gap:2px"><span class="xs" style="color:#4A5068">Net</span><span class="mono small" style="font-weight:600">${C.money(rent - costs)}</span></div></div>
+      <div class="grid3" style="background:var(--inv-soft);border-radius:10px;padding:10px 12px"><div class="stack" style="gap:2px"><span class="xs" style="color:#4E4A6E">Rent ${fy.label.slice(-7)}</span><span class="mono small" style="font-weight:600">${C.money(rent)}</span></div><div class="stack" style="gap:2px"><span class="xs" style="color:#4E4A6E">Costs</span><span class="mono small" style="font-weight:600">${C.money(costs)}</span></div><div class="stack" style="gap:2px"><span class="xs" style="color:#4E4A6E">Net</span><span class="mono small" style="font-weight:600">${C.money(rent - costs)}</span></div></div>
       <div class="grid2 no-print"><button class="btn small sec" data-act="rent" data-id="${p.id}">Rent changed / starts</button><button class="btn small ghost" data-act="editprop" data-id="${p.id}">Edit property</button></div></div>`;
   };
   const totalRent = C.round2(props.reduce((a, p) => a + C.rentIn(d, p, fy.from, fy.to), 0));
   const totalCost = C.sumAmounts(C.schedule(d, fy.from, fy.to, t, (b) => b.kind === 'investment'));
   const portfolio = C.liveBills(d).filter((b) => b.kind === 'investment' && !C.byId(d.properties, b.propertyId));
   return h`${back('#/settings', 'Investment properties', 'Kept apart — not in household totals')}
-  <div class="hero inv"><div class="small" style="color:#CDD2EA">${fy.label} · ${C.fmtDate(fy.from, { dow: false, year: true })} – ${C.fmtDate(fy.to, { dow: false, year: true })}</div>
-    <div class="grid3"><div class="stack" style="gap:2px"><span class="xs" style="color:#CDD2EA">Rent in</span><span class="mono" style="font-weight:600">${C.money(totalRent)}</span></div><div class="stack" style="gap:2px"><span class="xs" style="color:#CDD2EA">Costs out</span><span class="mono" style="font-weight:600">${C.money(totalCost)}</span></div><div class="stack" style="gap:2px"><span class="xs" style="color:#CDD2EA">Net</span><span class="mono" style="font-weight:600">${C.money(totalRent - totalCost)}</span></div></div>
-    <div class="xs" style="color:#CDD2EA;line-height:1.45">Rent counts only weeks actually rented. A negative net means the properties cost more than they bring in. Your accountant still does the official figures.</div></div>
+  <div class="hero inv"><div class="small" style="color:#D3D0E6">${fy.label} · ${C.fmtDate(fy.from, { dow: false, year: true })} – ${C.fmtDate(fy.to, { dow: false, year: true })}</div>
+    <div class="grid3"><div class="stack" style="gap:2px"><span class="xs" style="color:#D3D0E6">Rent in</span><span class="mono" style="font-weight:600">${C.money(totalRent)}</span></div><div class="stack" style="gap:2px"><span class="xs" style="color:#D3D0E6">Costs out</span><span class="mono" style="font-weight:600">${C.money(totalCost)}</span></div><div class="stack" style="gap:2px"><span class="xs" style="color:#D3D0E6">Net</span><span class="mono" style="font-weight:600">${C.money(totalRent - totalCost)}</span></div></div>
+    <div class="xs" style="color:#D3D0E6;line-height:1.45">Rent counts only weeks actually rented. A negative net means the properties cost more than they bring in. Your accountant still does the official figures.</div></div>
   ${props.filter((p) => p.status !== 'sold').map(card)}
   ${portfolio.length ? h`<div class="card pad stack"><h3>Across the portfolio</h3><div class="list">${portfolio.map((b) => h`<a class="item" href="#/bill/${b.id}" style="padding-left:0"><span class="grow small">${b.name}${b.notes ? h`<br><span class="xs muted">${b.notes}</span>` : ''}</span><span class="mono small">${C.money(C.sumAmounts(C.schedule(d, fy.from, fy.to, t, (x) => x.id === b.id)))}</span></a>`)}</div></div>` : ''}
   <div class="grid2 no-print"><button class="btn" data-act="editprop" data-id="">+ Add a property</button><a class="btn ghost" href="#/edit/new">+ Add a property bill</a></div>
@@ -934,7 +948,7 @@ function scrReports() {
   const top = [...byBill.values()].sort((a, b) => b.total - a.total).slice(0, 8);
   const types = (d.types || []).filter((x) => !x.del).sort((a, b) => (a.order || 0) - (b.order || 0));
   const share = C.totalsByType(d, hhItems).sort((a, b) => b.total - a.total);
-  if (S.ui.rInv) { const inv = C.sumAmounts(items.filter((i) => !C.inTotals(i.bill))); if (inv) share.push({ name: 'Investment properties (included)', color: '#6250d6', total: inv }); share.sort((a, b) => b.total - a.total); }
+  if (S.ui.rInv) { const inv = C.sumAmounts(items.filter((i) => !C.inTotals(i.bill))); if (inv) share.push({ name: 'Investment properties (included)', color: '#6559B8', total: inv }); share.sort((a, b) => b.total - a.total); }
   const grand = share.reduce((a, x) => a + x.total, 0) || 1, maxS = share.length ? share[0].total : 1;
   // months for the chart
   const months = [];
@@ -977,9 +991,9 @@ function scrReports() {
   <div class="card pad stack" style="gap:12px"><h3>Where the money goes</h3>
     ${share.length ? share.map((s) => h`<div class="stack" style="gap:4px"><div class="between small"><span class="row" style="gap:6px"><span class="dot" style="background:${s.color}"></span>${s.name}</span><span><span class="mono" style="font-weight:600">${C.money(s.total, 0)}</span> <span class="muted">· ${Math.round(s.total / grand * 100)}%</span></span></div><div class="bar"><span style="width:${(s.total / maxS * 100).toFixed(1)}%;background:${s.color}"></span></div></div>`) : h`<div class="small muted">Nothing in this period.</div>`}</div>
   ${top.length ? h`<div class="card pad stack" style="gap:6px"><h3>Biggest household bills</h3><table class="t"><tbody>${top.map((x, k) => h`<tr><td style="width:18px" class="muted">${k + 1}</td><td><span class="row" style="gap:8px"><span class="dot" style="background:${C.typeColor(d, x.bill)}"></span>${x.bill.name}</span></td><td class="r">${C.money(x.total)}</td></tr>`)}</tbody></table></div>` : ''}
-  <div class="card pad stack" style="gap:8px"><h3>Price changes</h3>${changes.length ? h`<table class="t"><thead><tr><th>Bill</th><th>From</th><th class="r">New</th><th class="r">Change</th></tr></thead><tbody>${changes.map((c) => h`<tr><td>${c.bill.name}</td><td>${C.fmtDate(c.from, { dow: false, year: true })}</td><td class="r">${C.money(c.amount)}</td><td class="r" style="color:${c.change > 0 ? 'var(--red)' : '#1B6B3A'}">${c.change > 0 ? '+' : ''}${c.pct}%</td></tr>`)}</tbody></table>` : h`<div class="small muted">No bills changed price in this period. Each time you use “Change amount” it's listed here.</div>`}</div>
-  <a class="hero inv" href="#/properties" style="color:#fff"><div class="between"><h3>Investment properties</h3>${icon('next', 18)}</div><div class="xs" style="color:#CDD2EA">${S.ui.rInv ? 'Included in the figures above' : 'Kept apart — not in the figures above'}</div>
-    <table class="t" style="color:#fff"><thead><tr><th style="border-color:#55608a"></th><th class="r" style="border-color:#55608a">Rent</th><th class="r" style="border-color:#55608a">Costs</th><th class="r" style="border-color:#55608a">Net</th></tr></thead><tbody>${invRows.map((x) => h`<tr><td style="border-color:#3d4775">${x.p.name}</td><td class="r" style="border-color:#3d4775">${C.money(x.rent)}</td><td class="r" style="border-color:#3d4775">${C.money(x.cost)}</td><td class="r" style="border-color:#3d4775">${C.money(x.rent - x.cost)}</td></tr>`)}${portfolioCost ? h`<tr><td style="border-color:#3d4775">Across the portfolio</td><td class="r" style="border-color:#3d4775">—</td><td class="r" style="border-color:#3d4775">${C.money(portfolioCost)}</td><td class="r" style="border-color:#3d4775">${C.money(-portfolioCost)}</td></tr>` : ''}<tr><td><b>Total</b></td><td class="r"><b>${C.money(invRent)}</b></td><td class="r"><b>${C.money(invCost)}</b></td><td class="r"><b>${C.money(invRent - invCost)}</b></td></tr></tbody></table></a>
+  <div class="card pad stack" style="gap:8px"><h3>Price changes</h3>${changes.length ? h`<table class="t"><thead><tr><th>Bill</th><th>From</th><th class="r">New</th><th class="r">Change</th></tr></thead><tbody>${changes.map((c) => h`<tr><td>${c.bill.name}</td><td>${C.fmtDate(c.from, { dow: false, year: true })}</td><td class="r">${C.money(c.amount)}</td><td class="r" style="color:${c.change > 0 ? 'var(--red)' : '#1B7048'}">${c.change > 0 ? '+' : ''}${c.pct}%</td></tr>`)}</tbody></table>` : h`<div class="small muted">No bills changed price in this period. Each time you use “Change amount” it's listed here.</div>`}</div>
+  <a class="hero inv" href="#/properties" style="color:#fff"><div class="between"><h3>Investment properties</h3>${icon('next', 18)}</div><div class="xs" style="color:#D3D0E6">${S.ui.rInv ? 'Included in the figures above' : 'Kept apart — not in the figures above'}</div>
+    <table class="t" style="color:#fff"><thead><tr><th style="border-color:#5A5590"></th><th class="r" style="border-color:#5A5590">Rent</th><th class="r" style="border-color:#5A5590">Costs</th><th class="r" style="border-color:#5A5590">Net</th></tr></thead><tbody>${invRows.map((x) => h`<tr><td style="border-color:#4A4580">${x.p.name}</td><td class="r" style="border-color:#4A4580">${C.money(x.rent)}</td><td class="r" style="border-color:#4A4580">${C.money(x.cost)}</td><td class="r" style="border-color:#4A4580">${C.money(x.rent - x.cost)}</td></tr>`)}${portfolioCost ? h`<tr><td style="border-color:#4A4580">Across the portfolio</td><td class="r" style="border-color:#4A4580">—</td><td class="r" style="border-color:#4A4580">${C.money(portfolioCost)}</td><td class="r" style="border-color:#4A4580">${C.money(-portfolioCost)}</td></tr>` : ''}<tr><td><b>Total</b></td><td class="r"><b>${C.money(invRent)}</b></td><td class="r"><b>${C.money(invCost)}</b></td><td class="r"><b>${C.money(invRent - invCost)}</b></td></tr></tbody></table></a>
   <div class="small muted" style="line-height:1.45">Future dates are projected from your bills; past ones use the amounts that applied then. Paid ticks and direct debits turn projections into actuals.</div>
   <button class="btn no-print" data-act="print">${icon('download', 18)} Export PDF</button>`;
 }
@@ -1156,12 +1170,12 @@ const A = {
       <div class="xs muted">Each moved bill gets a “tell the provider” to-do until you tick it.</div><button class="btn" type="submit">Move selected</button></form>`.toString());
   },
   edittype: (el) => {
-    const d = doc(), t = C.byId(d.types, el.dataset.id) || { id: '', name: '', color: PALETTE.find(([c]) => !(d.types || []).some((x) => !x.del && x.color === c))?.[0] || '#2a78d6' };
+    const d = doc(), t = C.byId(d.types, el.dataset.id) || { id: '', name: '', color: PALETTE.find(([c]) => !(d.types || []).some((x) => !x.del && x.color === c))?.[0] || '#4C7A9A' };
     const n = C.liveBills(d).filter((b) => b.typeId === t.id).length;
     const s = openSheet(h`<h2>${t.id ? 'Edit type' : 'Add a type'}</h2><form data-form="type" data-id="${t.id}" class="stack-lg"><label class="field">Name<input name="name" value="${t.name}" required></label>
-      <div class="stack" style="gap:8px"><span class="field" style="gap:0">Colour</span><div style="display:grid;grid-template-columns:repeat(9,minmax(0,1fr));gap:6px">${PALETTE.map(([c, l]) => h`<label style="position:relative;height:38px;border-radius:8px;background:${c};border:3px solid ${c === t.color ? '#15202B' : '#fff'};outline:1px solid var(--line)" title="${l}"><input type="radio" name="color" value="${c}" ${c === t.color ? 'checked' : ''} aria-label="${l}" style="position:absolute;opacity:0;inset:0;margin:0"></label>`)}</div><span class="xs muted" id="clash"></span></div>
+      <div class="stack" style="gap:8px"><span class="field" style="gap:0">Colour</span><div style="display:grid;grid-template-columns:repeat(9,minmax(0,1fr));gap:6px">${PALETTE.map(([c, l]) => h`<label style="position:relative;height:38px;border-radius:8px;background:${c};border:3px solid ${c === t.color ? '#191C1F' : '#fff'};outline:1px solid var(--line)" title="${l}"><input type="radio" name="color" value="${c}" ${c === t.color ? 'checked' : ''} aria-label="${l}" style="position:absolute;opacity:0;inset:0;margin:0"></label>`)}</div><span class="xs muted" id="clash"></span></div>
       <button class="btn" type="submit">Save</button></form>${t.id ? (n ? h`<div class="small muted">${n} bills use this type — move them to another type before deleting it.</div>` : h`<button class="btn danger small" data-act="deltype" data-id="${t.id}">Delete type</button>`) : ''}`.toString());
-    s.addEventListener('change', (e) => { if (e.target.name === 'color') { s.querySelectorAll('input[name=color]').forEach((i) => { i.parentElement.style.borderColor = i.checked ? '#15202B' : '#fff'; }); const other = (d.types || []).find((x) => !x.del && x.id !== t.id && x.color === e.target.value); s.querySelector('#clash').textContent = other ? 'Also used by ' + other.name + ' — pick another so they’re easy to tell apart.' : ''; } });
+    s.addEventListener('change', (e) => { if (e.target.name === 'color') { s.querySelectorAll('input[name=color]').forEach((i) => { i.parentElement.style.borderColor = i.checked ? '#191C1F' : '#fff'; }); const other = (d.types || []).find((x) => !x.del && x.id !== t.id && x.color === e.target.value); s.querySelector('#clash').textContent = other ? 'Also used by ' + other.name + ' — pick another so they’re easy to tell apart.' : ''; } });
   },
   deltype: async (el) => { const t = C.byId(doc().types, el.dataset.id); closeSheet(); await commit('Deleted type ' + t.name, () => { touch(t); t.del = true; }); },
   editprop: (el) => {
@@ -1269,22 +1283,22 @@ const A = {
       if (S.doc && !(await confirmSheet('Replace what\'s on this phone?', 'The backup will be merged with what\'s here; where both changed the same thing, the newer change wins.', 'Restore'))) return;
       clampStamps(d);
       S.doc = S.doc ? C.mergeDocs(S.doc, d) : d;
-      await St.saveLocal(S.doc); await askName(); location.hash = '#/'; render(); queueSync(500); toast('Restored');
+      await saveDoc(S.doc); await askName(); location.hash = '#/'; render(); queueSync(500); toast('Restored');
     } catch (e) { toast(e.message, 5000); }
   },
   importfile: async () => {
     const f = await pickFile(); if (!f) return;
     try {
       const j = JSON.parse(f.text);
-      if (!St.looksLikeDoc(j)) { if (j.ct) { const pass = prompt('Passphrase for this backup:'); if (!pass) return; S.doc = await St.readBackupFile(f.text, pass); if (!S.dev.passphrase) S.dev.passphrase = pass; await St.saveLocal(S.doc); await St.saveDevice(S.dev); await askName(); location.hash = '#/'; return; } throw new Error("That isn't a Bills import file"); }
+      if (!St.looksLikeDoc(j)) { if (j.ct) { const pass = prompt('Passphrase for this backup:'); if (!pass) return; S.doc = await St.readBackupFile(f.text, pass); if (!S.dev.passphrase) S.dev.passphrase = pass; await saveDoc(S.doc); await St.saveDevice(S.dev); await askName(); location.hash = '#/'; return; } throw new Error("That isn't a Bills import file"); }
       if (!j.trackedFrom) j.trackedFrom = today();
       clampStamps(j);
       S.doc = S.doc ? C.mergeDocs(S.doc, j) : j;
-      await St.saveLocal(S.doc); await askName();
+      await saveDoc(S.doc); await askName();
       location.hash = '#/'; toast('Imported ' + C.liveBills(S.doc).length + ' bills');
     } catch (e) { toast(e.message, 5000); }
   },
-  startempty: async () => { S.doc = St.emptyDoc(); S.doc.trackedFrom = today(); S.doc.people = [{ id: C.uid('pe'), name: 'Me', pays: [], u: Date.now() }]; await St.saveLocal(S.doc); await askName(); location.hash = '#/'; },
+  startempty: async () => { S.doc = St.emptyDoc(); S.doc.trackedFrom = today(); S.doc.people = [{ id: C.uid('pe'), name: 'Me', pays: [], u: Date.now() }]; await saveDoc(S.doc); await askName(); location.hash = '#/'; },
   disconnect: async () => {
     if (!(await confirmSheet('Disconnect this phone?', 'Your bills stay on this phone, but it stops syncing and backing up. The other phone and GitHub are not changed.', 'Disconnect', true))) return;
     S.dev.github = null; S.dev.passphrase = ''; S.dev.salt = null; await St.saveDevice(S.dev); S.sync = 'off'; render();
@@ -1401,7 +1415,7 @@ const F = {
     closeSheet();
     await commit((id ? 'Edited type ' : 'Added type ') + name, (dd) => {
       const t = id ? C.byId(dd.types, id) : { id: C.uid('t'), order: Math.max(0, ...dd.types.map((x) => x.order || 0)) + 1 };
-      t.name = name; t.color = fd.get('color') || t.color || '#2a78d6'; touch(t);
+      t.name = name; t.color = fd.get('color') || t.color || '#4C7A9A'; touch(t);
       if (!id) dd.types.push(t);
     });
   },
@@ -1444,7 +1458,7 @@ const F = {
       const restoring = !S.doc;
       const r = await St.sync(S.doc || St.joinDoc(), S.dev, restoring ? 'Restored on this phone' : 'First backup');
       if (restoring && !C.liveBills(r.doc).length && !r.doc.people.length) { const fresh = St.emptyDoc(); fresh.trackedFrom = today(); r.doc = C.mergeDocs(r.doc, fresh); }
-      S.doc = r.doc; await St.saveLocal(S.doc); await St.saveDevice(S.dev); S.sync = 'ok';
+      S.doc = r.doc; await saveDoc(S.doc); await St.saveDevice(S.dev); S.sync = 'ok';
       toast(restoring && C.liveBills(S.doc).length ? 'Your bills are back — ' + C.liveBills(S.doc).length + ' bills from GitHub' : 'Connected — your bills are backed up', 5000); if (restoring) await askName(); location.hash = restoring && C.liveBills(S.doc).length ? '#/' : '#/sync'; render(); queueDbx(1000);
     } catch (e) { S.dev.github = null; toast(e.message, 6000); }
   },
@@ -1455,7 +1469,7 @@ const F = {
       await St.ghCheck(gh);
       S.dev = { ...S.dev, github: gh, passphrase: fd.get('pass'), name: fd.get('name').trim() || S.dev.name };
       const r = await St.sync(S.doc || St.joinDoc(), S.dev, 'Joined');
-      S.doc = r.doc; await St.saveLocal(S.doc); await St.saveDevice(S.dev); S.sync = 'ok';
+      S.doc = r.doc; await saveDoc(S.doc); await St.saveDevice(S.dev); S.sync = 'ok';
       toast('Joined — ' + C.liveBills(S.doc).length + ' bills'); location.hash = '#/';
     } catch (e) { toast(e.message, 6000); }
   },
@@ -1541,7 +1555,8 @@ async function start() {
   S.doc = await St.loadLocal();
   const qp = new URLSearchParams(location.search);
   if (qp.has('code') || qp.has('error')) { onRoute(); await dbxReturn(qp); }
-  if (S.doc) { const fixed = C.fixNewBillStarts(S.doc, tz()); if (fixed.length) { fixed.forEach((b) => { b.u = Date.now(); }); S.doc.updatedAt = Date.now(); S.doc.activity = S.doc.activity || []; S.doc.activity.unshift({ id: C.uid('ac'), at: Date.now(), u: Date.now(), by: S.dev.name || 'Me', text: 'Removed the made-up history before ' + fixed.map((b) => b.name + ' was added (' + C.fmtDate(b.startDate, { dow: false }) + ')').join(', ') }); await St.saveLocal(S.doc); } }
+  if (S.doc) { const fixed = C.fixNewBillStarts(S.doc, tz()); if (fixed.length) { fixed.forEach((b) => { b.u = Date.now(); }); S.doc.updatedAt = Date.now(); S.doc.activity = S.doc.activity || []; S.doc.activity.unshift({ id: C.uid('ac'), at: Date.now(), u: Date.now(), by: S.dev.name || 'Me', text: 'Removed the made-up history before ' + fixed.map((b) => b.name + ' was added (' + C.fmtDate(b.startDate, { dow: false }) + ')').join(', ') }); await saveDoc(S.doc); } }
+  if (S.doc && recolourTypes(S.doc)) await saveDoc(S.doc);
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('./sw.js', { scope: './' }).catch(() => {});
   onRoute();
