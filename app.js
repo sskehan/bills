@@ -4,7 +4,7 @@ import * as St from './store.js';
 import { makeSetupCode, readSetupCode, unlock } from './crypto.js';
 import * as DB from './dropbox.js';
 
-const APP_VERSION = '1.41';
+const APP_VERSION = '1.42';
 import { h, raw, esc, icon, toast, openSheet, closeSheet, confirmSheet, download, pickFile, copyText } from './ui.js';
 
 const PALETTE = [['#4C7A9A', 'Steel blue'], ['#B4643C', 'Copper'], ['#3E8C6D', 'Teal'], ['#BF9330', 'Ochre'], ['#94607F', 'Plum'], ['#5E7A3A', 'Olive'], ['#6559B8', 'Indigo'], ['#B5524A', 'Brick'], ['#8C9096', 'Grey']];
@@ -44,7 +44,7 @@ async function doSync(manual) {
     S.sync = 'ok'; S.syncErr = '';
     if (St.canon(S.doc) !== before) { if (!editing()) render(); else renderStatusOnly(); queueDbx(1000); } else renderStatusOnly();
     if (manual) toast(r.status === 'pushed' ? 'Saved to GitHub' : 'Up to date');
-  } catch (e) { S.sync = 'error'; S.syncErr = e.message; renderStatusOnly(); if (manual) toast(e.message, 5000); }
+  } catch (e) { S.sync = 'error'; S.syncErr = (!navigator.onLine || e instanceof TypeError || /failed to fetch|network/i.test(e.message)) ? 'Couldn’t reach GitHub — check your internet. It will try again automatically.' : e.message; renderStatusOnly(); if (manual) toast(S.syncErr, 5000); }
   finally { syncing = false; }
 }
 // ---------- Dropbox (an extra locked copy, plus daily snapshots) ----------
@@ -452,7 +452,7 @@ function scrReviews() {
   <div class="between" style="padding:4px 2px 0"><h2>Coming up</h2><span class="small muted">Soonest first</span></div>
   <div class="card list">${list.length ? list.map(({ b, r, nd }) => h`<div class="item"><span class="stack" style="width:46px;flex-shrink:0;align-items:center;background:var(--bg);border-radius:8px;padding:4px 0"><span class="xs muted" style="font-weight:600;text-transform:uppercase">${r.next ? C.monthName(Number(r.next.slice(5, 7)) - 1, false) : '—'}</span><b style="font-size:17px">${r.next ? Number(r.next.slice(8)) : '?'}</b></span>
     <a class="grow stack" href="#/bill/${b.id}" style="gap:3px;color:inherit"><span class="t">${b.name}</span><span class="xs muted">${b.review.last ? 'Last reviewed ' + C.fmtDate(b.review.last, { year: true, dow: false }) : 'Never reviewed'}${nd && (b.freq === 'Annual' || b.freq === 'Every 5 yrs') ? ' · renews ' + C.fmtDate(nd, { dow: false }) : ''}</span></a>
-    ${r.status === 'ok' ? h`<span class="pill green">Up to date</span>` : h`<button class="btn small" data-act="review" data-bill="${b.id}">Reviewed</button>`}</div>`) : h`<div class="empty">No bills are set to be reviewed.</div>`}</div>
+    ${r.status === 'ok' ? h`<span class="pill green">Up to date</span>` : h`<button class="btn small ${r.status === 'soon' ? 'due-soon' : 'due-over'}" data-act="review" data-bill="${b.id}">Reviewed</button>`}</div>`) : h`<div class="empty">No bills are set to be reviewed.</div>`}</div>
   <div class="card pad small" style="line-height:1.5;color:var(--ink2)"><b>How the status works</b> — same rules as your spreadsheet: the next review is 12 months after the last. <b>Due soon</b> = within 30 days of that. <b>Overdue</b> = past it. Annual bills also get a "compare before it renews" alert 45 days before renewal if not reviewed.</div>`;
 }
 
@@ -836,7 +836,8 @@ function scrAlerts() {
   <div class="card pad stack small" style="line-height:1.55"><h3>3 · The 7 am job on GitHub</h3><div>The alerts are sent by a scheduled job in your private <b>${S.dev.github ? S.dev.github.repo : 'bills-data'}</b> repo. It needs your family passphrase stored once as a GitHub secret called <b>BILLS_PASSPHRASE</b> (Settings → Secrets and variables → Actions → New repository secret). GitHub never shows it again.</div><div class="muted">GitHub's scheduler can run 5–30 minutes late, so "7:00" may arrive about 7:15.</div></div>` : ''}
   <form data-form="alerts" class="card pad stack-lg"><h3>What you're told about</h3>
     <label class="field">Morning summary covers the next<select name="digestDays">${[1, 2, 3, 5, 7].map((x) => opt(x, x + (x === 1 ? ' day' : ' days'), r.digestDays ?? 3))}</select><span class="hint">Every bill due in that window, each morning at about 7 am.</span></label>
-    <label class="field">Big one-off bills (quarterly, annual, 5-yearly) — extra warning<select name="lumpDays">${[0, 7, 14, 21, 30].map((x) => opt(x, x ? x + ' days before' : 'No extra warning', (r.lumpDays || [14])[0] ?? 0))}</select></label>
+    <label class="field">A “big bill” is $<input class="money" type="number" inputmode="decimal" step="1" min="0" name="bigMin" value="${C.bigMin(doc())}"><span class="hint">Quarterly, annual and one-off bills of at least this much. Smaller ones still show on Upcoming and in the morning summary, without extra warnings.</span></label>
+    <label class="field">Big bills — extra warning<select name="lumpDays">${[0, 7, 14, 21, 30].map((x) => opt(x, x ? x + ' days before' : 'No extra warning', (r.lumpDays || [14])[0] ?? 0))}</select></label>
     <label class="field">Annual renewal not reviewed — warn<select name="reviewDays">${[30, 45, 60].map((x) => opt(x, x + ' days before', r.reviewDays ?? 45))}</select><span class="hint">Review reminders go out on Monday mornings.</span></label>
     <label class="switch"><span class="stack" style="gap:2px"><b style="font-size:15px">Sunday 6 pm: the week ahead</b><span class="small muted">Household bills for the next 7 days</span></span><input type="checkbox" name="weekly" ${r.weekly !== false ? 'checked' : ''}></label>
     <label class="switch"><span class="stack" style="gap:2px"><b style="font-size:15px">Transfer days</b><span class="small muted">7 am on the day, and 6 pm if not ticked</span></span><input type="checkbox" name="transferCheck" ${r.transferCheck !== false ? 'checked' : ''}></label>
@@ -1377,6 +1378,7 @@ const F = {
       const r = dd.settings.reminders;
       r.digestDays = Number(fd.get('digestDays')); const l = Number(fd.get('lumpDays')); r.lumpDays = l ? [l] : []; r.reviewDays = Number(fd.get('reviewDays'));
       r.weekly = fd.get('weekly') === 'on'; r.transferCheck = fd.get('transferCheck') === 'on';
+      const bm = Number(fd.get('bigMin')); if (fd.get('bigMin') !== '' && bm >= 0) r.bigMin = bm;
       dd.settings.ntfy.server = (fd.get('server') || 'https://ntfy.sh').trim(); touch(dd.settings);
     });
     toast('Saved');

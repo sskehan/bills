@@ -8,6 +8,8 @@ export const PER_YEAR = { Weekly: 52, Fortnightly: 26, Monthly: 12, Quarterly: 4
 const DAY_STEP = { Weekly: 7, Fortnightly: 14 };
 const MONTH_STEP = { Monthly: 1, Quarterly: 3, Annual: 12, 'Every 5 yrs': 60 };
 export const LUMP = new Set(['Quarterly', 'Annual', 'Every 5 yrs', 'One-off']);
+// A "big bill" is a lump sum (quarterly, annual, 5-yearly, one-off) of at least this much ($500 unless changed in Push alerts).
+export const bigMin = (doc) => { const v = doc && doc.settings && doc.settings.reminders && doc.settings.reminders.bigMin; return typeof v === 'number' && v >= 0 ? v : 500; };
 const DAY = 86400000;
 
 // ---------- dates ----------
@@ -313,7 +315,12 @@ export function followUps(doc, today) {
     // Already paid early? Then the "due soon" warnings for that date don't apply.
     const ndPaid = nd ? settled(payState(doc, b, nd, today)) : false;
     if (nd && !ndPaid && b.freq === 'Every 5 yrs' && days <= 90) { p = Math.min(p, 1); t.push('Renewal due ' + fmtDate(nd, { year: true }) + ' — renew'); }
-    if (nd && !ndPaid && LUMP.has(b.freq) && days <= 14) { p = Math.min(p, 1); t.push(money(amt, 0) + ' lump sum due in ' + days + ' day(s)' + (b.payMethod === 'manual' ? ' — pay it yourself' : b.accountId ? ' — check funds in ' + accountName(doc, b.accountId) : '')); }
+    if (nd && !ndPaid && LUMP.has(b.freq) && amt !== null && amt >= bigMin(doc)) {
+      // pay it yourself: HIGH from 14 days out — you have to act
+      if (b.payMethod === 'manual' && days <= 14) { p = Math.min(p, 1); t.push(money(amt, 0) + ' lump sum due in ' + days + ' day' + (days === 1 ? '' : 's') + ' — pay it yourself'); }
+      // direct debit: MED in the last 7 days — just have the money there
+      else if (b.payMethod !== 'manual' && b.payMethod !== 'rent' && days <= 7) { p = Math.min(p, 2); t.push(money(amt, 0) + ' comes out ' + (days === 0 ? 'today' : fmtDate(nd)) + (b.accountId ? ' — check funds in ' + accountName(doc, b.accountId) : '')); }
+    }
     if (nd && rv.status !== 'na' && (b.freq === 'Annual' || b.freq === 'Every 5 yrs') && days <= 45 && !reviewCurrentStrict(b, today)) { p = Math.min(p, 1); t.push('Renews in ' + days + ' days — review & compare before it renews'); }
     if (rv.status === 'overdue') { p = Math.min(p, 1); t.push('Review overdue (last reviewed ' + fmtDate(b.review.last, { year: true }) + ')'); }
     if (rv.status === 'future') { p = Math.min(p, 2); t.push('Last-reviewed date is in the future — check it'); }
@@ -524,7 +531,7 @@ export function buildAlerts(doc, now = new Date()) {
     if (n <= digestDays) continue;
     const d = addDays(today, n);
     for (const i of schedule(doc, d, d, today, (b) => active(b) && LUMP.has(b.freq))) {
-      if (i.state !== 'due') continue;
+      if (i.state !== 'due' || !(i.amount >= bigMin(doc))) continue;
       const rv = reviewInfo(i.bill, today);
       const extra = rv.status !== 'na' && !reviewCurrent(i.bill, today) ? ' Review due — compare quotes before it renews.' : '';
       out.morning.push({ title: 'Big bill in ' + n + ' days', message: i.bill.name + ' ' + money(i.amount) + ' · due ' + fmtDate(i.due) + '.' + extra, tags: ['moneybag'], priority: 4 });
