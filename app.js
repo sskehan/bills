@@ -4,7 +4,7 @@ import * as St from './store.js';
 import { makeSetupCode, readSetupCode, unlock } from './crypto.js';
 import * as DB from './dropbox.js';
 
-const APP_VERSION = '1.43';
+const APP_VERSION = '1.44';
 import { h, raw, esc, icon, toast, openSheet, closeSheet, confirmSheet, download, pickFile, copyText } from './ui.js';
 
 const PALETTE = [['#4C7A9A', 'Steel blue'], ['#B4643C', 'Copper'], ['#3E8C6D', 'Teal'], ['#BF9330', 'Ochre'], ['#94607F', 'Plum'], ['#5E7A3A', 'Olive'], ['#6559B8', 'Indigo'], ['#B5524A', 'Brick'], ['#8C9096', 'Grey']];
@@ -270,10 +270,19 @@ function scrUpcoming() {
   const pStart = C.paydays(d.settings, C.addDays(t, -13), t).pop() || null;
   const ps = pStart || t, pe = C.addDays(ps, 13), np = C.addDays(pe, 1), npEnd = C.addDays(np, 13);
   const active = (b) => b.status === 'active';
+  // optional: whole cash flow including investment properties (per phone)
+  const incl = !!S.dev.inclInv;
+  const props = (d.properties || []).filter((p) => !p.del && p.status !== 'sold');
+  const hasInv = props.length > 0 || C.liveBills(d).some((b) => b.kind === 'investment');
+  const inc = (i) => C.inTotals(i.bill) || (incl && i.group === 'investment');
+  const isInv = (i) => i.group === 'investment';
   const per = C.schedule(d, ps, pe, t, active);
-  const hh = per.filter((i) => C.inTotals(i.bill));
+  const hh = per.filter(inc);
   const rem = per.filter((i) => i.group === 'reminder');
   const billsTot = C.sumAmounts(hh);
+  const hhTot = C.sumAmounts(hh.filter((i) => !isInv(i)));
+  const invTot = C.round2(billsTot - hhTot);
+  const rentTot = incl ? C.round2(props.reduce((a, p) => a + C.rentIn(d, p, ps, pe), 0)) : 0;
   const paidL = hh.filter((i) => C.settled(i.state));
   const paidTot = C.sumAmounts(paidL);
   const comeTot = C.round2(billsTot - paidTot);
@@ -310,17 +319,19 @@ function scrUpcoming() {
   const days = new Map();
   for (const i of toCome) { if (!days.has(i.due)) days.set(i.due, []); days.get(i.due).push(i); }
   const paidShow = paidL.filter((i) => !sel || i.due === sel);
+  const invRow = (i, pre) => h`<div class="invrow">${billRow(i, { sub: pre + 'Investment · ' + (propName(i.bill) || 'Across the portfolio') + (i.bill.payMethod === 'rent' ? ' · taken from rent' : '') })}</div>`;
   const remRow = (i) => billRow(i, { sub: 'Reminder only · not in totals · ' + (byIdName(d.others, i.bill.forWhom) || 'Someone else') });
-  const row = (i) => (i.group === 'reminder' ? h`<div class="rem">${remRow(i)}</div>` : billRow(i, i.bill.payMethod === 'manual' ? { sub: 'You pay this yourself · ' + [i.bill.accountId ? C.accountName(d, i.bill.accountId) : '', i.bill.bpay && i.bill.bpay.biller ? 'BPAY ' + i.bill.bpay.biller : ''].filter(Boolean).join(' · ') } : {}));
+  const row = (i) => (i.group === 'reminder' ? h`<div class="rem">${remRow(i)}</div>` : isInv(i) ? invRow(i, '') : billRow(i, i.bill.payMethod === 'manual' ? { sub: 'You pay this yourself · ' + [i.bill.accountId ? C.accountName(d, i.bill.accountId) : '', i.bill.bpay && i.bill.bpay.biller ? 'BPAY ' + i.bill.bpay.biller : ''].filter(Boolean).join(' · ') } : {}));
   // next pay
   const nxt = C.schedule(d, np, npEnd, t, active);
-  const nxtShow = nxt.filter((i) => C.inTotals(i.bill) || i.group === 'reminder');
-  const nxtTot = C.sumAmounts(nxt.filter((i) => C.inTotals(i.bill)));
+  const nxtShow = nxt.filter((i) => inc(i) || i.group === 'reminder');
+  const nxtTot = C.sumAmounts(nxt.filter(inc));
   const nxtOpen = S.ui.open.nextpay;
   const NXT = 6;
   // investment properties: this pay and next
-  const inv = C.schedule(d, t, npEnd, t, active).filter((i) => i.group === 'investment' && !C.settled(i.state));
-  const pct = (v) => (pay && pay > 0 ? Math.max(0, Math.min(100, v / pay * 100)).toFixed(1) : (billsTot > 0 ? (v / billsTot * 100).toFixed(1) : 0));
+  const inv = incl ? [] : C.schedule(d, t, npEnd, t, active).filter((i) => i.group === 'investment' && !C.settled(i.state));
+  const inMoney = (pay || 0) + rentTot;
+  const pct = (v) => (inMoney > 0 ? Math.max(0, Math.min(100, v / inMoney * 100)).toFixed(1) : (billsTot > 0 ? (v / billsTot * 100).toFixed(1) : 0));
   const tiles = [];
   for (const tr of trs) tiles.push(h`<div class="uptile go"><a class="t" href="#/transfers">${tr.date === t ? 'Today' : 'Tomorrow'} · transfer</a><div class="v">${C.money(tr.total)}</div><div class="x">Savings → personal for ${tr.items.map((i) => i.bill.name).join(', ')}</div>
     <button class="tbtn ${tr.check ? 'on' : ''}" data-act="trtick" data-date="${tr.date}">${tr.check ? 'Done ✓ ' + tr.check.by : 'Mark done'}</button></div>`);
@@ -334,23 +345,32 @@ function scrUpcoming() {
   ${pending ? h`<a class="banner amber row" href="#/checkpay" style="color:inherit">${icon('warn', 20)}<span class="grow">Confirm how <b>${pending}</b> imported bills are paid (direct debit or you pay them).</span>${icon('next', 18)}</a>` : ''}
   <section class="hero" aria-label="This pay">
     <div class="lbl">${pStart ? 'This pay · ' + C.fmtDate(ps) + ' – ' + C.fmtDate(pe) : 'Next 14 days'}</div>
-    <div class="stack" style="gap:6px">${pay !== null ? h`<div class="big">${C.money(pay - billsTot)}</div><div class="sub">left after household bills${pStart ? ' · next payday ' + C.fmtDate(np) : ''}</div>` : h`<div class="big">${C.money(comeTot)}</div><div class="sub">household bills still to come${pStart ? '' : ' · '}${pStart ? '' : h`<a href="#/pay" style="color:#8FE0C4;font-weight:600">set your payday</a>`}</div>`}</div>
-    <div class="trio">${pay !== null ? h`<div>Pay in<b>${C.money(pay)}</b></div>` : h`<div>Paid so far<b>${C.money(paidTot)}</b></div>`}<div>Bills<b>${C.money(billsTot)}</b></div><div>Still to come<b>${C.money(comeTot)}</b></div></div>
+    ${incl ? h`<div class="stack" style="gap:6px">${pay !== null ? h`<div class="big">${C.money(pay + rentTot - billsTot)}</div><div class="sub">left after everything, properties included${pStart ? ' · next payday ' + C.fmtDate(np) : ''}</div>` : h`<div class="big">${C.money(rentTot - billsTot)}</div><div class="sub">rent less all bills · <a href="#/pay" style="color:#8FE0C4;font-weight:600">add your pay</a></div>`}</div>
+    <div class="flow">
+      ${pay !== null ? h`<div><span>Pay in</span><b>${C.money(pay)}</b></div>` : ''}
+      <div><span>Rent in${props.filter((p) => C.rentIn(d, p, ps, pe) > 0).length ? ' · ' + props.filter((p) => C.rentIn(d, p, ps, pe) > 0).map((p) => p.name).join(', ') : ''}</span><b>${C.money(rentTot)}</b></div>
+      <div><span>Household bills</span><b>–${C.money(hhTot)}</b></div>
+      <div><span>Investment bills</span><b>–${C.money(invTot)}</b></div>
+    </div>
+    <div class="xs" style="color:var(--hero-sub);line-height:1.4">Rent is paid monthly by the agent. It's counted here per fortnight, so the money may land in a different pay.</div>`
+    : h`<div class="stack" style="gap:6px">${pay !== null ? h`<div class="big">${C.money(pay - billsTot)}</div><div class="sub">left after household bills${pStart ? ' · next payday ' + C.fmtDate(np) : ''}</div>` : h`<div class="big">${C.money(comeTot)}</div><div class="sub">household bills still to come${pStart ? '' : ' · '}${pStart ? '' : h`<a href="#/pay" style="color:#8FE0C4;font-weight:600">set your payday</a>`}</div>`}</div>
+    <div class="trio">${pay !== null ? h`<div>Pay in<b>${C.money(pay)}</b></div>` : h`<div>Paid so far<b>${C.money(paidTot)}</b></div>`}<div>Bills<b>${C.money(billsTot)}</b></div><div>Still to come<b>${C.money(comeTot)}</b></div></div>`}
     <div class="pbar"><i style="width:${pct(paidTot)}%"></i><u style="width:${pct(comeTot)}%"></u></div>
-    <div class="between xs" style="color:var(--hero-sub)"><span><b style="color:#5FC4A4">■</b> paid ${C.money(paidTot, 0)} &nbsp;<b style="color:#E3B566">■</b> to come</span><a href="#/ahead" style="color:#8FE0C4;font-weight:600">By account →</a></div>
+    <div class="between xs" style="color:var(--hero-sub)"><span><b style="color:#5FC4A4">■</b> paid ${C.money(paidTot, 0)} &nbsp;<b style="color:#E3B566">■</b> to come ${incl ? C.money(comeTot, 0) : ''}</span><a href="#/ahead" style="color:#8FE0C4;font-weight:600">By account →</a></div>
   </section>
+  ${hasInv ? h`<label class="switch invswitch"><span class="stack" style="gap:2px"><b style="font-size:15px">Include investment properties</b><span class="small muted">${incl ? 'Showing rent and property bills too' : 'Household only'}</span></span><input type="checkbox" data-act="inclinv" ${incl ? 'checked' : ''}></label>` : ''}
   ${over.length ? h`<div class="card" style="border:1.5px solid var(--red)"><div style="padding:12px 16px 4px"><h3 style="color:var(--red-ink)">Overdue — still to pay</h3><span class="xs muted">Alerts repeat until ticked</span></div>
     <div class="list">${over.map((i) => billRow(i, { sub: 'Was due ' + C.fmtDate(i.due) + ' · ' + C.relDays(C.daysBetween(t, i.due)).toLowerCase() + (i.group === 'reminder' ? ' · reminder only' : '') }))}</div></div>` : ''}
   <div class="between eyebrow"><span>${pStart ? 'Your fortnight' : 'Next 14 days'}</span><span>${sel ? h`<button class="linkbtn" data-act="upsel" data-d="">Show all days</button>` : 'Tap a day'}</span></div>
   <div class="days">${bubbles}</div>
   ${tiles.length ? h`<div class="uptiles ${tiles.length === 1 ? 'one' : ''}">${tiles}</div>` : ''}
-  <div class="between" style="padding:4px 2px 0"><h2>${sel ? C.fmtDate(sel) : pStart ? 'Still to come this pay' : 'Still to come'}</h2><span class="mono small muted">${C.money(C.sumAmounts(toCome.filter((i) => C.inTotals(i.bill))))}</span></div>
+  <div class="between" style="padding:4px 2px 0"><h2>${sel ? C.fmtDate(sel) : pStart ? 'Still to come this pay' : 'Still to come'}</h2><span class="mono small muted">${C.money(C.sumAmounts(toCome.filter(inc)))}</span></div>
   <div class="card">
-    ${days.size ? [...days.entries()].map(([dd, list]) => h`<div class="dh"><span>${C.fmtDate(dd)} · ${C.relDays(C.daysBetween(t, dd))}</span><span class="mono">${C.money(C.sumAmounts(list.filter((i) => C.inTotals(i.bill))))}</span></div><div class="list">${list.map(row)}</div>`) : h`<div class="empty">${sel ? 'Nothing still to come on this day.' : 'Nothing else due this pay.'}</div>`}
-    ${paidShow.length ? h`<div class="dh"><span>Already paid this pay</span><span class="mono">${C.money(C.sumAmounts(paidShow))}</span></div><div class="list">${paidShow.map((i) => billRow(i, { sub: C.fmtDate(i.due) + (C.paymentFor(d, i.bill.id, i.due) && C.paymentFor(d, i.bill.id, i.due).by ? ' · ticked by ' + C.paymentFor(d, i.bill.id, i.due).by : '') }))}</div>` : ''}
+    ${days.size ? [...days.entries()].map(([dd, list]) => h`<div class="dh"><span>${C.fmtDate(dd)} · ${C.relDays(C.daysBetween(t, dd))}</span><span class="mono">${C.money(C.sumAmounts(list.filter(inc)))}</span></div><div class="list">${list.map(row)}</div>`) : h`<div class="empty">${sel ? 'Nothing still to come on this day.' : 'Nothing else due this pay.'}</div>`}
+    ${paidShow.length ? h`<div class="dh"><span>Already paid this pay</span><span class="mono">${C.money(C.sumAmounts(paidShow))}</span></div><div class="list">${paidShow.map((i) => isInv(i) ? invRow(i, C.fmtDate(i.due) + ' · ') : billRow(i, { sub: C.fmtDate(i.due) + (C.paymentFor(d, i.bill.id, i.due) && C.paymentFor(d, i.bill.id, i.due).by ? ' · ticked by ' + C.paymentFor(d, i.bill.id, i.due).by : '') }))}</div>` : ''}
   </div>
   ${pStart ? h`<div class="between" style="padding:4px 2px 0"><h2>Next pay starts ${C.fmtDate(np)}</h2><span class="mono small muted">${C.money(nxtTot)}</span></div>
-  <div class="card dashed">${nxtShow.length ? h`<div class="list">${(nxtOpen ? nxtShow : nxtShow.slice(0, NXT)).map((i) => (i.group === 'reminder' ? h`<div class="rem">${billRow(i, { sub: C.fmtDate(i.due) + ' · reminder only · ' + (byIdName(d.others, i.bill.forWhom) || 'Someone else') })}</div>` : billRow(i, { sub: C.fmtDate(i.due) + ' · ' + (i.bill.payMethod === 'manual' ? 'you pay this yourself' : C.accountName(d, i.bill.accountId)) })))}
+  <div class="card dashed">${nxtShow.length ? h`<div class="list">${(nxtOpen ? nxtShow : nxtShow.slice(0, NXT)).map((i) => (isInv(i) ? invRow(i, C.fmtDate(i.due) + ' · ') : i.group === 'reminder' ? h`<div class="rem">${billRow(i, { sub: C.fmtDate(i.due) + ' · reminder only · ' + (byIdName(d.others, i.bill.forWhom) || 'Someone else') })}</div>` : billRow(i, { sub: C.fmtDate(i.due) + ' · ' + (i.bill.payMethod === 'manual' ? 'you pay this yourself' : C.accountName(d, i.bill.accountId)) })))}
     ${nxtShow.length > NXT ? h`<button class="item" data-act="toggle" data-k="nextpay" style="justify-content:center;color:var(--brand);font-weight:600">${nxtOpen ? 'Show fewer' : 'Show all ' + nxtShow.length}</button>` : ''}</div>` : h`<div class="empty">Nothing due next pay yet.</div>`}</div>` : ''}
   ${inv.length ? h`<div class="card inv"><div class="between" style="padding:14px 16px 6px"><span class="stack" style="gap:2px"><h3>Investment properties</h3><span class="xs" style="color:var(--inv-ink);font-weight:600">Not included in household totals · ${inv.length} payment${inv.length > 1 ? 's' : ''}</span></span><span class="mono">${C.money(C.sumAmounts(inv))}</span></div>
     <div class="list">${inv.map((i) => billRow(i, { sub: C.fmtDate(i.due) + ' · ' + (propName(i.bill) || 'Across the portfolio') }))}</div></div>` : ''}
@@ -1154,6 +1174,7 @@ const A = {
   toggle: (el) => { const k = el.dataset.k; S.ui.open[k] = !S.ui.open[k]; render(); },
   calsel: (el) => { S.ui.calSel = el.dataset.d; render(); },
   ahead: (el) => { S.ui.range = Number(el.dataset.v) || 7; location.hash = '#/ahead'; },
+  inclinv: async (el) => { S.dev.inclInv = el.checked; await saveDev(); render(); },
   upsel: (el) => { const v = el.dataset.d || null; S.ui.upSel = v && S.ui.upSel !== v ? v : null; render(); },
   calmonth: (el) => { const m = S.ui.calMonth || today().slice(0, 8) + '01'; S.ui.calMonth = C.addMonths(m, Number(el.dataset.v)); S.ui.calSel = null; render(); },
   pay: async (el) => {

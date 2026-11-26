@@ -191,3 +191,11 @@ table.t td.r, table.t th.r { text-align: right; font-family: var(--mono); }
 .links a { background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 13px 14px; font-weight: 600; font-size: 14px; color: var(--ink); display: flex; justify-content: space-between; }
 .links a span { color: var(--brand); }
 .uptile .x, .uptile .li { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
+/* 1.44 include investment properties */
+.hero .flow { display: flex; flex-direction: column; gap: 6px; border-top: 1px solid #3A4046; padding-top: 12px; }
+.hero .flow > div { display: flex; justify-content: space-between; gap: 10px; font-size: 14px; color: var(--hero-sub); }
+.hero .flow b { font-family: var(--mono); font-weight: 500; color: #fff; white-space: nowrap; }
+.invswitch { background: var(--inv-soft); border: 1px solid var(--inv-line); border-radius: 14px; padding: 10px 14px; }
+.invswitch input:checked { background: var(--inv-ink); }
+.invrow { background: var(--inv-soft); }
+.invrow .s { color: var(--inv-ink); }
