@@ -4,7 +4,7 @@ import * as St from './store.js';
 import { makeSetupCode, readSetupCode, unlock } from './crypto.js';
 import * as DB from './dropbox.js';
 
-const APP_VERSION = '1.42';
+const APP_VERSION = '1.43';
 import { h, raw, esc, icon, toast, openSheet, closeSheet, confirmSheet, download, pickFile, copyText } from './ui.js';
 
 const PALETTE = [['#4C7A9A', 'Steel blue'], ['#B4643C', 'Copper'], ['#3E8C6D', 'Teal'], ['#BF9330', 'Ochre'], ['#94607F', 'Plum'], ['#5E7A3A', 'Olive'], ['#6559B8', 'Indigo'], ['#B5524A', 'Brick'], ['#8C9096', 'Grey']];
@@ -264,8 +264,102 @@ function emptyCard(text) { return h`<div class="card"><div class="empty">${text}
 
 // ---------- screens ----------
 function scrUpcoming() {
-  const d = doc(), t = today(), range = S.ui.range;
+  const d = doc(), t = today();
   if (!C.liveBills(d).length) return h`${head('Upcoming')}<div class="card pad stack"><h3>No bills yet</h3><div class="small muted">Import the file made from your spreadsheet, join Lyndsey's copy, or add bills by hand.</div><a class="btn" href="#/setup">Get started</a></div>`;
+  // this pay fortnight (falls back to the next 14 days if no payday is set)
+  const pStart = C.paydays(d.settings, C.addDays(t, -13), t).pop() || null;
+  const ps = pStart || t, pe = C.addDays(ps, 13), np = C.addDays(pe, 1), npEnd = C.addDays(np, 13);
+  const active = (b) => b.status === 'active';
+  const per = C.schedule(d, ps, pe, t, active);
+  const hh = per.filter((i) => C.inTotals(i.bill));
+  const rem = per.filter((i) => i.group === 'reminder');
+  const billsTot = C.sumAmounts(hh);
+  const paidL = hh.filter((i) => C.settled(i.state));
+  const paidTot = C.sumAmounts(paidL);
+  const comeTot = C.round2(billsTot - paidTot);
+  const pay = pStart ? payIn(pStart) : null;
+  const big = C.bigMin(d);
+  // overdue things you pay yourself (and reminders) are pinned at the top
+  const over = C.schedule(d, C.addDays(t, -60), C.addDays(t, -1), t, (b) => active(b) && (b.payMethod === 'manual' || b.kind === 'reminder')).filter((i) => i.state === 'overdue');
+  const isOver = (i) => i.state === 'overdue';
+  const trs = C.transfers(d, t, C.addDays(t, 1), t);
+  const fu = C.followUps(d, t);
+  const pending = (d.settings.payCheckPending || []).length;
+  // day bubbles
+  const perDay = new Map();
+  for (const i of hh) { const x = perDay.get(i.due) || { v: 0, open: 0, n: 0 }; x.v += i.amount || 0; x.n++; if (!C.settled(i.state)) x.open++; perDay.set(i.due, x); }
+  for (const i of rem) { const x = perDay.get(i.due) || { v: 0, open: 0, n: 0, r: 0 }; x.r = (x.r || 0) + 1; perDay.set(i.due, x); }
+  const short = (v) => (v >= 10000 ? '$' + Math.round(v / 1000) + 'k' : '$' + Math.round(v).toLocaleString('en-AU'));
+  const sel = S.ui.upSel && S.ui.upSel >= ps && S.ui.upSel <= pe ? S.ui.upSel : null;
+  const bubbles = [];
+  for (let day = ps; day <= pe; day = C.addDays(day, 1)) {
+    const x = perDay.get(day);
+    const past = day < t, isT = day === t;
+    const hasTr = trs.some((tr) => tr.date === day && !tr.check);
+    let a = '—', cls = '';
+    if (x && x.n) {
+      if (past) { a = x.open ? '! ' + short(x.v) : '✓ ' + short(x.v); if (x.open) cls = 'bad'; }
+      else { a = short(x.v); if (x.v >= big) cls = 'big'; }
+    } else if (x && x.r) a = 'reminder';
+    if (isT && hasTr && !(x && x.n)) a = 'move $';
+    const dow = isT ? 'TODAY' : C.fmtDate(day).slice(0, 3).toUpperCase();
+    bubbles.push(h`<button class="${past ? 'past' : ''} ${isT ? 'today' : ''} ${cls} ${day === sel ? 'sel' : ''}" data-act="upsel" data-d="${day}" aria-label="${C.fmtDate(day)}${x && x.n ? ', ' + C.money(x.v) : ''}"><span class="w">${dow}</span><span class="n">${Number(day.slice(8))}</span><span class="a">${a}</span></button>`);
+  }
+  // still to come this pay, grouped by day (overdue ones are pinned above instead)
+  const toCome = [...hh.filter((i) => !C.settled(i.state)), ...rem.filter((i) => !C.settled(i.state))].filter((i) => !isOver(i) && (!sel || i.due === sel)).sort((a, b) => (a.due < b.due ? -1 : a.due > b.due ? 1 : 0));
+  const days = new Map();
+  for (const i of toCome) { if (!days.has(i.due)) days.set(i.due, []); days.get(i.due).push(i); }
+  const paidShow = paidL.filter((i) => !sel || i.due === sel);
+  const remRow = (i) => billRow(i, { sub: 'Reminder only · not in totals · ' + (byIdName(d.others, i.bill.forWhom) || 'Someone else') });
+  const row = (i) => (i.group === 'reminder' ? h`<div class="rem">${remRow(i)}</div>` : billRow(i, i.bill.payMethod === 'manual' ? { sub: 'You pay this yourself · ' + [i.bill.accountId ? C.accountName(d, i.bill.accountId) : '', i.bill.bpay && i.bill.bpay.biller ? 'BPAY ' + i.bill.bpay.biller : ''].filter(Boolean).join(' · ') } : {}));
+  // next pay
+  const nxt = C.schedule(d, np, npEnd, t, active);
+  const nxtShow = nxt.filter((i) => C.inTotals(i.bill) || i.group === 'reminder');
+  const nxtTot = C.sumAmounts(nxt.filter((i) => C.inTotals(i.bill)));
+  const nxtOpen = S.ui.open.nextpay;
+  const NXT = 6;
+  // investment properties: this pay and next
+  const inv = C.schedule(d, t, npEnd, t, active).filter((i) => i.group === 'investment' && !C.settled(i.state));
+  const pct = (v) => (pay && pay > 0 ? Math.max(0, Math.min(100, v / pay * 100)).toFixed(1) : (billsTot > 0 ? (v / billsTot * 100).toFixed(1) : 0));
+  const tiles = [];
+  for (const tr of trs) tiles.push(h`<div class="uptile go"><a class="t" href="#/transfers">${tr.date === t ? 'Today' : 'Tomorrow'} · transfer</a><div class="v">${C.money(tr.total)}</div><div class="x">Savings → personal for ${tr.items.map((i) => i.bill.name).join(', ')}</div>
+    <button class="tbtn ${tr.check ? 'on' : ''}" data-act="trtick" data-date="${tr.date}">${tr.check ? 'Done ✓ ' + tr.check.by : 'Mark done'}</button></div>`);
+  if (fu.length) tiles.push(h`<a class="uptile att" href="#/attention"><span class="t">Needs attention · ${fu.length}</span>
+    ${fu.slice(0, 2).map((f) => h`<span class="li"><span class="pill ${f.p === 1 ? 'solid-red' : f.p === 2 ? 'amber' : 'grey'}">${f.p === 1 ? 'HIGH' : f.p === 2 ? 'MED' : 'LOW'}</span> <b>${f.bill.name}</b> ${f.text}</span>`)}
+    <span class="more">${fu.length > 2 ? 'See all ' + fu.length + ' →' : 'Open →'}</span></a>`);
+  return h`
+  ${head('Upcoming', h`<a class="icon-btn" href="#/reports" aria-label="Reports">${icon('chart')}</a><a class="icon-btn brand" href="#/edit/new" aria-label="Add a bill">${icon('plus')}</a>`)}
+  ${!S.dev.github && d.settings.ntfy && d.settings.ntfy.topic ? h`<a class="banner red row" href="#/sync" style="color:inherit">${icon('warn', 20)}<span class="grow"><b>Not saving to GitHub.</b> Your 7 am alerts${S.dev.name === 'Shaun' ? ' and Lyndsey’s phone' : ''} are using old information. Tap to reconnect.</span>${icon('next', 18)}</a>` : S.dev.github && S.sync === 'error' ? h`<a class="banner red row" href="#/sync" style="color:inherit">${icon('warn', 20)}<span class="grow"><b>GitHub isn't accepting changes:</b> ${S.syncErr} Alerts are using old information until this is fixed.</span>${icon('next', 18)}</a>` : ''}
+  ${!DB.isOn(S.dev) ? h`<a class="banner amber row" href="#/sync" style="color:inherit">${icon('warn', 20)}<span class="grow">Your bills aren't in Dropbox yet. <b>Connect Dropbox</b> so clearing Chrome can't lose them.</span>${icon('next', 18)}</a>` : S.dbx === 'error' ? h`<a class="banner red row" href="#/sync" style="color:inherit">${icon('warn', 20)}<span class="grow">Dropbox backup problem: ${S.dbxErr}</span>${icon('next', 18)}</a>` : ''}
+  ${pending ? h`<a class="banner amber row" href="#/checkpay" style="color:inherit">${icon('warn', 20)}<span class="grow">Confirm how <b>${pending}</b> imported bills are paid (direct debit or you pay them).</span>${icon('next', 18)}</a>` : ''}
+  <section class="hero" aria-label="This pay">
+    <div class="lbl">${pStart ? 'This pay · ' + C.fmtDate(ps) + ' – ' + C.fmtDate(pe) : 'Next 14 days'}</div>
+    <div class="stack" style="gap:6px">${pay !== null ? h`<div class="big">${C.money(pay - billsTot)}</div><div class="sub">left after household bills${pStart ? ' · next payday ' + C.fmtDate(np) : ''}</div>` : h`<div class="big">${C.money(comeTot)}</div><div class="sub">household bills still to come${pStart ? '' : ' · '}${pStart ? '' : h`<a href="#/pay" style="color:#8FE0C4;font-weight:600">set your payday</a>`}</div>`}</div>
+    <div class="trio">${pay !== null ? h`<div>Pay in<b>${C.money(pay)}</b></div>` : h`<div>Paid so far<b>${C.money(paidTot)}</b></div>`}<div>Bills<b>${C.money(billsTot)}</b></div><div>Still to come<b>${C.money(comeTot)}</b></div></div>
+    <div class="pbar"><i style="width:${pct(paidTot)}%"></i><u style="width:${pct(comeTot)}%"></u></div>
+    <div class="between xs" style="color:var(--hero-sub)"><span><b style="color:#5FC4A4">■</b> paid ${C.money(paidTot, 0)} &nbsp;<b style="color:#E3B566">■</b> to come</span><a href="#/ahead" style="color:#8FE0C4;font-weight:600">By account →</a></div>
+  </section>
+  ${over.length ? h`<div class="card" style="border:1.5px solid var(--red)"><div style="padding:12px 16px 4px"><h3 style="color:var(--red-ink)">Overdue — still to pay</h3><span class="xs muted">Alerts repeat until ticked</span></div>
+    <div class="list">${over.map((i) => billRow(i, { sub: 'Was due ' + C.fmtDate(i.due) + ' · ' + C.relDays(C.daysBetween(t, i.due)).toLowerCase() + (i.group === 'reminder' ? ' · reminder only' : '') }))}</div></div>` : ''}
+  <div class="between eyebrow"><span>${pStart ? 'Your fortnight' : 'Next 14 days'}</span><span>${sel ? h`<button class="linkbtn" data-act="upsel" data-d="">Show all days</button>` : 'Tap a day'}</span></div>
+  <div class="days">${bubbles}</div>
+  ${tiles.length ? h`<div class="uptiles ${tiles.length === 1 ? 'one' : ''}">${tiles}</div>` : ''}
+  <div class="between" style="padding:4px 2px 0"><h2>${sel ? C.fmtDate(sel) : pStart ? 'Still to come this pay' : 'Still to come'}</h2><span class="mono small muted">${C.money(C.sumAmounts(toCome.filter((i) => C.inTotals(i.bill))))}</span></div>
+  <div class="card">
+    ${days.size ? [...days.entries()].map(([dd, list]) => h`<div class="dh"><span>${C.fmtDate(dd)} · ${C.relDays(C.daysBetween(t, dd))}</span><span class="mono">${C.money(C.sumAmounts(list.filter((i) => C.inTotals(i.bill))))}</span></div><div class="list">${list.map(row)}</div>`) : h`<div class="empty">${sel ? 'Nothing still to come on this day.' : 'Nothing else due this pay.'}</div>`}
+    ${paidShow.length ? h`<div class="dh"><span>Already paid this pay</span><span class="mono">${C.money(C.sumAmounts(paidShow))}</span></div><div class="list">${paidShow.map((i) => billRow(i, { sub: C.fmtDate(i.due) + (C.paymentFor(d, i.bill.id, i.due) && C.paymentFor(d, i.bill.id, i.due).by ? ' · ticked by ' + C.paymentFor(d, i.bill.id, i.due).by : '') }))}</div>` : ''}
+  </div>
+  ${pStart ? h`<div class="between" style="padding:4px 2px 0"><h2>Next pay starts ${C.fmtDate(np)}</h2><span class="mono small muted">${C.money(nxtTot)}</span></div>
+  <div class="card dashed">${nxtShow.length ? h`<div class="list">${(nxtOpen ? nxtShow : nxtShow.slice(0, NXT)).map((i) => (i.group === 'reminder' ? h`<div class="rem">${billRow(i, { sub: C.fmtDate(i.due) + ' · reminder only · ' + (byIdName(d.others, i.bill.forWhom) || 'Someone else') })}</div>` : billRow(i, { sub: C.fmtDate(i.due) + ' · ' + (i.bill.payMethod === 'manual' ? 'you pay this yourself' : C.accountName(d, i.bill.accountId)) })))}
+    ${nxtShow.length > NXT ? h`<button class="item" data-act="toggle" data-k="nextpay" style="justify-content:center;color:var(--brand);font-weight:600">${nxtOpen ? 'Show fewer' : 'Show all ' + nxtShow.length}</button>` : ''}</div>` : h`<div class="empty">Nothing due next pay yet.</div>`}</div>` : ''}
+  ${inv.length ? h`<div class="card inv"><div class="between" style="padding:14px 16px 6px"><span class="stack" style="gap:2px"><h3>Investment properties</h3><span class="xs" style="color:var(--inv-ink);font-weight:600">Not included in household totals · ${inv.length} payment${inv.length > 1 ? 's' : ''}</span></span><span class="mono">${C.money(C.sumAmounts(inv))}</span></div>
+    <div class="list">${inv.map((i) => billRow(i, { sub: C.fmtDate(i.due) + ' · ' + (propName(i.bill) || 'Across the portfolio') }))}</div></div>` : ''}
+  <div class="links"><a href="#/ahead" data-act="ahead" data-v="30">Next 30 days <span>→</span></a><a href="#/ahead">By account <span>→</span></a></div>
+  `;
+}
+function scrAhead() {
+  const d = doc(), t = today(), range = S.ui.range;
+  if (!C.liveBills(d).length) return h`${back('#/', 'Coming up')}<div class="card pad stack"><h3>No bills yet</h3><div class="small muted">Import the file made from your spreadsheet, join Lyndsey's copy, or add bills by hand.</div><a class="btn" href="#/setup">Get started</a></div>`;
   const end = C.addDays(t, range);
   const all = C.schedule(d, t, end, t, (b) => b.status === 'active');
   const hh = all.filter((i) => C.inTotals(i.bill));
@@ -285,10 +379,7 @@ function scrUpcoming() {
   for (const i of hh) { if (!days.has(i.due)) days.set(i.due, []); days.get(i.due).push(i); }
   const pending = (d.settings.payCheckPending || []).length;
   return h`
-  ${head('Upcoming', h`<a class="icon-btn" href="#/reports" aria-label="Reports">${icon('chart')}</a><a class="icon-btn brand" href="#/edit/new" aria-label="Add a bill">${icon('plus')}</a>`)}
-  ${!S.dev.github && d.settings.ntfy && d.settings.ntfy.topic ? h`<a class="banner red row" href="#/sync" style="color:inherit">${icon('warn', 20)}<span class="grow"><b>Not saving to GitHub.</b> Your 7 am alerts${S.dev.name === 'Shaun' ? ' and Lyndsey’s phone' : ''} are using old information. Tap to reconnect.</span>${icon('next', 18)}</a>` : S.dev.github && S.sync === 'error' ? h`<a class="banner red row" href="#/sync" style="color:inherit">${icon('warn', 20)}<span class="grow"><b>GitHub isn't accepting changes:</b> ${S.syncErr} Alerts are using old information until this is fixed.</span>${icon('next', 18)}</a>` : ''}
-  ${!DB.isOn(S.dev) ? h`<a class="banner amber row" href="#/sync" style="color:inherit">${icon('warn', 20)}<span class="grow">Your bills aren't in Dropbox yet. <b>Connect Dropbox</b> so clearing Chrome can't lose them.</span>${icon('next', 18)}</a>` : S.dbx === 'error' ? h`<a class="banner red row" href="#/sync" style="color:inherit">${icon('warn', 20)}<span class="grow">Dropbox backup problem: ${S.dbxErr}</span>${icon('next', 18)}</a>` : ''}
-  ${pending ? h`<a class="banner amber row" href="#/checkpay" style="color:inherit">${icon('warn', 20)}<span class="grow">Confirm how <b>${pending}</b> imported bills are paid (direct debit or you pay them).</span>${icon('next', 18)}</a>` : ''}
+  ${back('#/', 'Coming up', 'Totals, accounts and every bill by day')}
   <section class="hero" aria-label="Summary">
     <div class="seg" role="group" aria-label="Range"><button data-act="range" data-v="7" aria-pressed="${range === 7}">Next 7 days</button><button data-act="range" data-v="30" aria-pressed="${range === 30}">Next 30 days</button></div>
     <div class="stack" style="gap:2px"><div class="sub" style="color:#A7AEB4;font-size:13px">Household bills due in the next ${range} days</div><div class="big">${C.money(total)}</div>
@@ -296,18 +387,6 @@ function scrUpcoming() {
     ${byAcc.size ? h`<hr><div class="xs" style="font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:#9AA2A8">Needed in each account (all bills)</div>
     ${[...byAcc.entries()].map(([id, v]) => h`<div class="between" style="font-size:15px"><span>${C.accountName(d, id)}</span><span class="mono">${C.money(v)}</span></div>`)}` : ''}
   </section>
-  ${trs.map((tr) => h`<div class="card pad row">${raw('<span class="icon-btn" style="width:40px;height:40px;background:var(--brand-soft);color:var(--brand);border:0">')}${icon('swap', 18)}${raw('</span>')}
-    <a class="grow stack" href="#/transfers" style="gap:2px;color:inherit"><b>${tr.date === t ? 'Today' : 'Tomorrow'}: savings → personal ${C.money(tr.total)}</b><span class="small muted">${tr.items.map((i) => i.bill.name).join(' · ')}${tr.check ? ' · ticked by ' + tr.check.by : ''}</span></a>
-    <button class="tick ${tr.check ? 'on' : ''}" data-act="trtick" data-date="${tr.date}" aria-label="Transfer done">${icon('check', 18, 2.4)}</button></div>`)}
-  ${manual.length ? h`<div class="card" style="border:1.5px solid var(--amber)"><div class="between" style="padding:14px 16px 6px"><span class="stack" style="gap:2px"><h3>You pay these yourself</h3><span class="xs muted">Not direct debit · alerts repeat until ticked</span></span></div>
-    <div class="list">${manual.map((i) => billRow(i, { sub: (i.state === 'overdue' ? 'Overdue — was due ' : 'Due ') + C.fmtDate(i.due) + ' · ' + C.relDays(C.daysBetween(t, i.due)).toLowerCase() + (i.bill.bpay && i.bill.bpay.biller ? ' · BPAY ' + i.bill.bpay.biller : '') }))}</div></div>` : ''}
-  ${others.length ? h`<div class="card dashed"><div style="padding:14px 16px 6px"><div class="eyebrow" style="padding:0">Reminder only · not in your totals</div></div>
-    <div class="list">${others.map((i) => billRow(i, { sub: (byIdName(d.others, i.bill.forWhom) || 'Someone else') + ' · ' + (i.state === 'overdue' ? 'overdue — was due ' : 'due ') + C.fmtDate(i.due) }))}</div></div>` : ''}
-  ${inv.length ? h`<div class="card inv"><div class="between" style="padding:14px 16px 6px"><span class="stack" style="gap:2px"><h3>Investment properties</h3><span class="xs" style="color:var(--inv-ink);font-weight:600">Not included in household totals · ${inv.length} payment${inv.length > 1 ? 's' : ''}</span></span><span class="mono">${C.money(C.sumAmounts(inv))}</span></div>
-    <div class="list">${inv.map((i) => billRow(i, { sub: C.fmtDate(i.due) + ' · ' + (propName(i.bill) || 'Across the portfolio') }))}</div></div>` : ''}
-  ${fu.length ? h`<div class="card"><div class="between" style="padding:14px 16px 8px"><h3>Needs attention</h3><a class="pill red" href="#/attention">${fu.length}</a></div><div class="list">
-    ${fu.slice(0, 4).map((f) => h`<a class="item" href="#/bill/${f.bill.id}"><span class="pill ${f.p === 1 ? 'solid-red' : f.p === 2 ? 'amber' : 'grey'}">${f.p === 1 ? 'HIGH' : f.p === 2 ? 'MED' : 'LOW'}</span><span class="grow stack" style="gap:2px"><span class="t" style="font-weight:600">${f.bill.name}</span><span class="s">${f.text}</span></span>${icon('next', 18)}</a>`)}
-    ${fu.length > 4 ? h`<a class="item" href="#/attention" style="justify-content:center;color:var(--brand);font-weight:600">See all ${fu.length}</a>` : ''}</div></div>` : ''}
   <div class="between" style="padding:4px 2px 0"><h2>By day</h2><span class="small muted">Direct debits tick themselves</span></div>
   ${days.size ? [...days.entries()].map(([dd, list]) => h`<div class="stack" style="gap:6px"><div class="between" style="padding:0 2px"><span class="row" style="gap:8px"><b style="font-size:15px">${C.fmtDate(dd)}</b>${relPill(C.daysBetween(t, dd))}</span><span class="mono small muted">${C.money(C.sumAmounts(list))}</span></div>
     <div class="card list">${list.map((i) => billRow(i))}</div></div>`) : emptyCard('Nothing due in this period.')}
@@ -1018,6 +1097,7 @@ function screen() {
   switch (r) {
     case '': return scrUpcoming();
     case 'attention': return scrAttention();
+    case 'ahead': return scrAhead();
     case 'calendar': return scrCalendar();
     case 'bills': return scrBills();
     case 'reviews': return scrReviews();
@@ -1055,7 +1135,7 @@ function render() {
     console.error(e);
     app.innerHTML = h`<div class="banner red">Something went wrong showing this screen: ${e.message}</div><a class="btn" href="#/">Back to Upcoming</a>`.toString();
   }
-  document.getElementById('tabs').innerHTML = noTabs ? '' : TABS.map(([href, label, ic]) => h`<a href="${href}" ${tab === href || (href === '#/bills' && ['bill', 'edit'].includes(S.route.split('/')[0])) || (href === '#/settings' && ['pay', 'transfers', 'accounts', 'types', 'properties', 'others', 'checkpay', 'alerts', 'sync', 'excel', 'activity', 'health'].includes(S.route.split('/')[0])) ? raw('aria-current="page"') : ''}>${icon(ic)}${label}</a>`).join('');
+  document.getElementById('tabs').innerHTML = noTabs ? '' : TABS.map(([href, label, ic]) => h`<a href="${href}" ${tab === href || (href === '#/bills' && ['bill', 'edit'].includes(S.route.split('/')[0])) || (href === '#/' && S.route.split('/')[0] === 'ahead') || (href === '#/settings' && ['pay', 'transfers', 'accounts', 'types', 'properties', 'others', 'checkpay', 'alerts', 'sync', 'excel', 'activity', 'health'].includes(S.route.split('/')[0])) ? raw('aria-current="page"') : ''}>${icon(ic)}${label}</a>`).join('');
   document.getElementById('tabs').hidden = noTabs;
   app.querySelectorAll('form[data-form="bill"]').forEach((f) => { const dr = getDraft(f.dataset.id); if (dr) applyDraft(f, dr); updateShows(f); });
   if (keepScroll) window.scrollTo(0, y); else window.scrollTo(0, 0);
@@ -1073,6 +1153,8 @@ const A = {
   range: (el) => { S.ui.range = Number(el.dataset.v); render(); },
   toggle: (el) => { const k = el.dataset.k; S.ui.open[k] = !S.ui.open[k]; render(); },
   calsel: (el) => { S.ui.calSel = el.dataset.d; render(); },
+  ahead: (el) => { S.ui.range = Number(el.dataset.v) || 7; location.hash = '#/ahead'; },
+  upsel: (el) => { const v = el.dataset.d || null; S.ui.upSel = v && S.ui.upSel !== v ? v : null; render(); },
   calmonth: (el) => { const m = S.ui.calMonth || today().slice(0, 8) + '01'; S.ui.calMonth = C.addMonths(m, Number(el.dataset.v)); S.ui.calSel = null; render(); },
   pay: async (el) => {
     const d = doc(), b = C.byId(d.bills, el.dataset.bill), due = el.dataset.due;

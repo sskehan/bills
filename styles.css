@@ -154,3 +154,40 @@ table.t td.r, table.t th.r { text-align: right; font-family: var(--mono); }
 @font-face { font-family: 'IBM Plex Sans'; font-weight: 700; font-display: swap; src: url(ibm-plex-sans-latin-700-normal.woff2) format('woff2'); }
 @font-face { font-family: 'IBM Plex Mono'; font-weight: 500; font-display: swap; src: url(ibm-plex-mono-latin-500-normal.woff2) format('woff2'); }
 @font-face { font-family: 'IBM Plex Mono'; font-weight: 600; font-display: swap; src: url(ibm-plex-mono-latin-600-normal.woff2) format('woff2'); }
+/* 1.43 Upcoming: pay fortnight + day bubbles */
+.hero .lbl { font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--hero-sub); }
+.hero .trio { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; border-top: 1px solid #3A4046; padding-top: 12px; font-size: 12px; color: var(--hero-sub); }
+.hero .trio b { display: block; font-family: var(--mono); font-size: 15px; font-weight: 500; color: #fff; margin-top: 2px; white-space: nowrap; }
+.hero .pbar { height: 8px; border-radius: 4px; background: #3A4046; overflow: hidden; display: flex; }
+.hero .pbar i { background: #5FC4A4; } .hero .pbar u { background: #E3B566; }
+.days { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; }
+.days button { min-height: 62px; border: 1px solid var(--line); border-radius: 12px; background: #fff; color: var(--ink); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; padding: 5px 0; font: inherit; }
+.days .w { font-size: 10px; font-weight: 600; color: var(--muted); letter-spacing: .02em; }
+.days .n { font-size: 17px; font-weight: 600; }
+.days .a { font-size: 10px; font-family: var(--mono); color: var(--ink2); white-space: nowrap; overflow: hidden; max-width: 100%; }
+.days .past { background: transparent; border-color: var(--line2); }
+.days .past .w, .days .past .n { color: #A3A7AA; } .days .past .a { color: var(--brand); }
+.days .past.bad { border-color: var(--red); } .days .past.bad .a { color: var(--red-ink); font-weight: 600; }
+.days .big { background: var(--amber-bg); border-color: var(--amber); }
+.days .today { background: var(--brand); border-color: var(--brand); }
+.days .today .w, .days .today .n, .days .today .a { color: #fff; }
+.days .sel { outline: 2.5px solid var(--ink); outline-offset: 1px; }
+.linkbtn { border: 0; background: none; color: var(--brand); font: inherit; font-weight: 600; padding: 0; text-transform: none; letter-spacing: 0; }
+.uptiles { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; } .uptiles.one { grid-template-columns: 1fr; }
+.uptile { background: #fff; border: 1px solid var(--line); border-radius: 16px; padding: 12px 14px; display: flex; flex-direction: column; gap: 5px; color: var(--ink); }
+.uptile .t { font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+.uptile .v { font-family: var(--mono); font-size: 20px; font-weight: 600; }
+.uptile .x, .uptile .li { font-size: 13px; color: var(--ink2); line-height: 1.35; }
+.uptile .li b { font-weight: 600; color: var(--ink); }
+.uptile .more { font-size: 13px; font-weight: 600; color: var(--amber-ink); margin-top: auto; }
+.uptile.go { background: var(--brand-soft); border-color: #BFE0D3; } .uptile.go .t { color: var(--brand); }
+.uptile.att { background: var(--amber-bg); border-color: #E9C98F; } .uptile.att .t { color: var(--amber-ink); }
+.tbtn { margin-top: auto; align-self: flex-start; min-height: 36px; border: 1.5px solid var(--brand); border-radius: 10px; background: #fff; color: var(--brand); font: inherit; font-size: 13px; font-weight: 600; padding: 0 12px; }
+.tbtn.on { background: var(--brand); color: #fff; }
+.dh { display: flex; justify-content: space-between; font-size: 13px; font-weight: 600; color: var(--muted); padding: 10px 14px 2px; }
+.card > .dh:not(:first-child) { border-top: 1px solid var(--line2); }
+.rem .t, .rem .amt { color: var(--muted); }
+.links { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.links a { background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 13px 14px; font-weight: 600; font-size: 14px; color: var(--ink); display: flex; justify-content: space-between; }
+.links a span { color: var(--brand); }
+.uptile .x, .uptile .li { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
