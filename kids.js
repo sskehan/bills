@@ -212,3 +212,15 @@ export function suggestShares(doc, file) {
   }
   return out;
 }
+
+// ---------- 1.46: stop a shared bill counting what tab 6 already has ----------
+// Rows brought in from tab 6 that look like this bill (every word of its name of 3+ letters,
+// or the hint the import file gave), dated on or after the share's "counted from" date.
+export function nameTokens(name) { return String(name || '').toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length >= 3); }
+export function overlapRows(doc, bill, from) {
+  if (!bill || !C.isISO(from)) return [];
+  const toks = nameTokens(bill.name);
+  return (doc.kidExpenses || []).filter((e) => !e.del && C.isISO(e.date) && e.date >= from && (
+    e.billHint ? matches(bill.name, e.billHint) : (e.src === 'tab6' && toks.length > 0 && toks.every((w) => String(e.desc || '').toLowerCase().includes(w)))
+  ));
+}

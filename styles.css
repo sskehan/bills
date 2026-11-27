@@ -199,3 +199,27 @@ table.t td.r, table.t th.r { text-align: right; font-family: var(--mono); }
 .invswitch input:checked { background: var(--inv-ink); }
 .invrow { background: var(--inv-soft); }
 .invrow .s { color: var(--inv-ink); }
+
+/* ---------- 1.46: every screen adapts to the phone's width and text size ----------
+   Sizes are in em where it matters, so a larger text setting gets more room
+   instead of text running into its neighbours. */
+.head { display: flex; justify-content: space-between; align-items: center; gap: 8px 12px; flex-wrap: wrap; }
+.head > .stack { flex: 1 1 9em; min-width: 0; }
+.head > .acts { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-shrink: 0; }
+.hero .big { font-size: clamp(26px, 10vw, 38px); overflow-wrap: anywhere; }
+/* three figures side by side only while they fit; otherwise two, then one per line */
+.hero .trio { grid-template-columns: repeat(auto-fit, minmax(min(100%, max(7.5em, calc((100% - 16px) / 3))), 1fr)); row-gap: 10px; }
+.hero .flow > div, .hero .flow > a { flex-wrap: wrap; }
+.hero .between { flex-wrap: wrap; row-gap: 6px; }
+.grid2 { grid-template-columns: repeat(auto-fit, minmax(min(100%, max(9em, calc((100% - 10px) / 2))), 1fr)); }
+.grid3 { grid-template-columns: repeat(auto-fit, minmax(min(100%, max(6em, calc((100% - 16px) / 3))), 1fr)); }
+.grid2 > .btn, .grid3 > .btn { white-space: nowrap; }
+.tile .v { overflow-wrap: anywhere; }
+nav.tabs a { min-width: 0; flex: 1 1 0; max-width: 96px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+nav.tabs a span { overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.twrap { max-width: 100%; overflow-x: auto; }
+/* choice buttons sit side by side while they fit, and drop to a new line when the text is large */
+[data-radio].row { flex-wrap: wrap; }
+[data-radio].row > label.chip { flex: 1 1 6.5em !important; }
+.field input, .field select, .field textarea { min-width: 0; max-width: 100%; }
+#kidwarn:empty { display: none; }

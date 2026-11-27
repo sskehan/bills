@@ -1,6 +1,6 @@
 // Offline support. Only touches this app's own files and caches (names start
 // with "bills-"), so your other apps on the same site are left alone.
-const VERSION = 'bills-v1.45';
+const VERSION = 'bills-v1.46';
 const SHELL = [
   './', './index.html', './styles.css', './manifest.webmanifest',
   './app.js', './core.js', './kids.js', './crypto.js', './store.js', './ui.js', './dropbox.js', './qrcode.js',

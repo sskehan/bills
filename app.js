@@ -5,7 +5,7 @@ import * as St from './store.js';
 import { makeSetupCode, readSetupCode, unlock } from './crypto.js';
 import * as DB from './dropbox.js';
 
-const APP_VERSION = '1.45';
+const APP_VERSION = '1.46';
 // 1.45: the Kids "count shared bills at my share" switch (per phone, off by default).
 // With it off, C is exactly core.js. With it on, only schedule() and annualAmount()
 // show your share of bills ticked Shared. Stored data is never changed.
@@ -248,7 +248,7 @@ function back(href, title, sub) {
   return h`<div class="top no-print"><a class="back" href="${href}" aria-label="Back">${icon('back')}</a><div class="grow"><h1 style="font-size:22px">${title}</h1>${sub ? h`<div class="xs muted">${sub}</div>` : ''}</div>${syncDot()}</div>`;
 }
 function head(title, extra) {
-  return h`<div class="between"><div class="stack" style="gap:2px"><div class="small muted">${C.fmtLong(today())}</div><h1>${title}</h1></div><div class="row" style="gap:8px">${syncDot()}${extra || ''}</div></div>`;
+  return h`<div class="head"><div class="stack" style="gap:2px"><div class="small muted">${C.fmtLong(today())}</div><h1>${title}</h1></div><div class="acts">${syncDot()}${extra || ''}</div></div>`;
 }
 function weekendNote(b, due) { return C.isWeekend(due) && b.payMethod !== 'manual' ? ' · may come out ' + C.fmtDate(C.nextWeekday(due)) : ''; }
 function stateCell(i) {
@@ -340,7 +340,9 @@ function scrUpcoming() {
   const NXT = 6;
   // investment properties: this pay and next
   const inv = incl ? [] : C.schedule(d, t, npEnd, t, active).filter((i) => i.group === 'investment' && !C.settled(i.state));
-  const inMoney = (pay || 0) + rentTot;
+  // 1.46: money from Heidi that actually arrived this pay (not when shared bills are already shown at your share)
+  const kh = kidsUpcoming(d, ps, pe, t);
+  const inMoney = (pay || 0) + rentTot + kh.inPay;
   const pct = (v) => (inMoney > 0 ? Math.max(0, Math.min(100, v / inMoney * 100)).toFixed(1) : (billsTot > 0 ? (v / billsTot * 100).toFixed(1) : 0));
   const tiles = [];
   for (const tr of trs) tiles.push(h`<div class="uptile go"><a class="t" href="#/transfers">${tr.date === t ? 'Today' : 'Tomorrow'} · transfer</a><div class="v">${C.money(tr.total)}</div><div class="x">Savings → personal for ${tr.items.map((i) => i.bill.name).join(', ')}</div>
@@ -355,16 +357,19 @@ function scrUpcoming() {
   ${pending ? h`<a class="banner amber row" href="#/checkpay" style="color:inherit">${icon('warn', 20)}<span class="grow">Confirm how <b>${pending}</b> imported bills are paid (direct debit or you pay them).</span>${icon('next', 18)}</a>` : ''}
   <section class="hero" aria-label="This pay">
     <div class="lbl">${pStart ? 'This pay · ' + C.fmtDate(ps) + ' – ' + C.fmtDate(pe) : 'Next 14 days'}</div>
-    ${incl ? h`<div class="stack" style="gap:6px">${pay !== null ? h`<div class="big">${C.money(pay + rentTot - billsTot)}</div><div class="sub">left after everything, properties included${pStart ? ' · next payday ' + C.fmtDate(np) : ''}</div>` : h`<div class="big">${C.money(rentTot - billsTot)}</div><div class="sub">rent less all bills · <a href="#/pay" style="color:#8FE0C4;font-weight:600">add your pay</a></div>`}</div>
+    ${incl ? h`<div class="stack" style="gap:6px">${pay !== null ? h`<div class="big">${C.money(pay + rentTot + kh.inPay - billsTot)}</div><div class="sub">left after everything, properties included${pStart ? ' · next payday ' + C.fmtDate(np) : ''}</div>` : h`<div class="big">${C.money(rentTot + kh.inPay - billsTot)}</div><div class="sub">rent less all bills · <a href="#/pay" style="color:#8FE0C4;font-weight:600">add your pay</a></div>`}</div>
     <div class="flow">
       ${pay !== null ? h`<div><span>Pay in</span><b>${C.money(pay)}</b></div>` : ''}
+      ${kh.inPay ? h`<div><span>From ${kh.other} this pay</span><b>${C.money(kh.inPay)}</b></div>` : ''}
+      ${kh.show ? kidsOwesFlowRow(kh) : ''}
       <div><span>Rent in${props.filter((p) => C.rentIn(d, p, ps, pe) > 0).length ? ' · ' + props.filter((p) => C.rentIn(d, p, ps, pe) > 0).map((p) => p.name).join(', ') : ''}</span><b>${C.money(rentTot)}</b></div>
       <div><span>Household bills</span><b>–${C.money(hhTot)}</b></div>
       <div><span>Investment bills</span><b>–${C.money(invTot)}</b></div>
     </div>
     <div class="xs" style="color:var(--hero-sub);line-height:1.4">Rent is paid monthly by the agent. It's counted here per fortnight, so the money may land in a different pay.</div>`
-    : h`<div class="stack" style="gap:6px">${pay !== null ? h`<div class="big">${C.money(pay - billsTot)}</div><div class="sub">left after household bills${pStart ? ' · next payday ' + C.fmtDate(np) : ''}</div>` : h`<div class="big">${C.money(comeTot)}</div><div class="sub">household bills still to come${pStart ? '' : ' · '}${pStart ? '' : h`<a href="#/pay" style="color:#8FE0C4;font-weight:600">set your payday</a>`}</div>`}</div>
-    <div class="trio">${pay !== null ? h`<div>Pay in<b>${C.money(pay)}</b></div>` : h`<div>Paid so far<b>${C.money(paidTot)}</b></div>`}<div>Bills<b>${C.money(billsTot)}</b></div><div>Still to come<b>${C.money(comeTot)}</b></div></div>`}
+    : h`<div class="stack" style="gap:6px">${pay !== null ? h`<div class="big">${C.money(pay + kh.inPay - billsTot)}</div><div class="sub">left after household bills${kh.inPay ? ' (includes ' + C.money(kh.inPay) + ' from ' + kh.other + ')' : ''}${pStart ? ' · next payday ' + C.fmtDate(np) : ''}</div>` : h`<div class="big">${C.money(comeTot)}</div><div class="sub">household bills still to come${pStart ? '' : ' · '}${pStart ? '' : h`<a href="#/pay" style="color:#8FE0C4;font-weight:600">set your payday</a>`}</div>`}</div>
+    <div class="trio">${pay !== null ? h`<div>Pay in<b>${C.money(pay)}</b></div>` : h`<div>Paid so far<b>${C.money(paidTot)}</b></div>`}<div>Bills<b>${C.money(billsTot)}</b></div><div>Still to come<b>${C.money(comeTot)}</b></div></div>
+    ${kh.show ? h`<div class="flow">${kh.inPay ? h`<div><span>From ${kh.other} this pay</span><b>+${C.money(kh.inPay)}</b></div>` : ''}${kidsOwesFlowRow(kh)}</div>` : ''}`}
     <div class="pbar"><i style="width:${pct(paidTot)}%"></i><u style="width:${pct(comeTot)}%"></u></div>
     <div class="between xs" style="color:var(--hero-sub)"><span><b style="color:#5FC4A4">■</b> paid ${C.money(paidTot, 0)} &nbsp;<b style="color:#E3B566">■</b> to come ${incl ? C.money(comeTot, 0) : ''}</span><a href="#/ahead" style="color:#8FE0C4;font-weight:600">By account →</a></div>
   </section>
@@ -619,7 +624,7 @@ function scrBill(id) {
   return h`${back('#/bills', b.name, kindLabel)}
   ${b.status !== 'active' ? h`<div class="banner ${b.status === 'stopped' ? 'red' : 'amber'}">${b.status === 'stopped' ? 'Stopped on ' + C.fmtDate(b.stoppedAt, { year: true }) + '. No more reminders; history kept.' : 'Not started yet — no reminders until you add the details and switch it on.'}</div>` : ''}
   <div class="card pad stack" style="gap:14px">
-    <div class="between" style="align-items:flex-start"><span class="stack" style="gap:2px"><span class="mono" style="font-size:32px;font-weight:600">${amt(b, a)}</span><span class="small muted">${b.freq || '—'}${C.isOneOff(b) ? (b.refDate ? ' · due ' + C.fmtDate(b.refDate, { year: true }) : '') : a !== null && C.PER_YEAR[b.freq] ? ' · about ' + C.money(a * C.PER_YEAR[b.freq] / 12) + ' a month' : ''}${b.amountMode === 'percentPay' ? ' · ' + b.percent + '% of ' + (byIdName(d.people, b.personId) || 'pay') + '’s ' + (b.percentBase === 'takeHome' ? 'take-home' : 'gross') + ' pay' : ''}</span></span>
+    <div class="between wrap" style="align-items:flex-start;row-gap:8px"><span class="stack" style="gap:2px"><span class="mono" style="font-size:32px;font-weight:600">${amt(b, a)}</span><span class="small muted">${b.freq || '—'}${C.isOneOff(b) ? (b.refDate ? ' · due ' + C.fmtDate(b.refDate, { year: true }) : '') : a !== null && C.PER_YEAR[b.freq] ? ' · about ' + C.money(a * C.PER_YEAR[b.freq] / 12) + ' a month' : ''}${b.amountMode === 'percentPay' ? ' · ' + b.percent + '% of ' + (byIdName(d.people, b.personId) || 'pay') + '’s ' + (b.percentBase === 'takeHome' ? 'take-home' : 'gross') + ' pay' : ''}</span></span>
       ${nd ? (st === 'paid' ? h`<span class="pill green">Paid</span>` : st === 'scheduled' ? h`<span class="pill blue">Scheduled</span>` : relPill(C.daysBetween(t, nd))) : ''}</div>
     <div class="grid2"><div class="stack" style="gap:2px"><span class="xs muted">${C.isOneOff(b) ? 'Due' : 'Next due'}</span><b>${nd ? C.fmtDate(nd, { year: true }) : C.isOneOff(b) && b.refDate ? C.fmtDate(b.refDate, { year: true }) : '—'}</b>${nd && weekendNote(b, nd) ? h`<span class="xs muted">${weekendNote(b, nd).slice(3)}</span>` : ''}</div><div class="stack" style="gap:2px"><span class="xs muted">Paid from</span><b>${b.accountId ? C.accountName(d, b.accountId) : '—'}</b></div></div>
     ${overdue.length ? h`<button class="btn" data-act="pay" data-bill="${b.id}" data-due="${overdue[overdue.length - 1]}">Mark the ${C.fmtDate(overdue[overdue.length - 1], { dow: false })} payment as paid</button>`
@@ -903,7 +908,7 @@ function scrProperties() {
     const cr = (p.rents || []).filter((r) => !r.del).sort((a, b) => (a.from < b.from ? 1 : -1))[0];
     const bills = C.liveBills(d).filter((b) => b.kind === 'investment' && b.propertyId === p.id);
     const status = p.status === 'sold' ? h`<span class="pill grey">Sold ${C.fmtDate(p.soldAt, { year: true, dow: false })}</span>` : cr ? h`<span class="pill green">Rented</span>` : h`<span class="pill amber">${p.expectedWeekly ? 'Expected ' + C.money(p.expectedWeekly, 0) + '/wk' : 'Not rented'}</span>`;
-    return h`<div class="card pad stack" style="gap:12px"><div class="between" style="align-items:flex-start"><span class="stack" style="gap:2px"><h3>${p.name}</h3><span class="small muted">${p.manager ? 'Managed by ' + p.manager : ''}${cr ? ' · ' + C.money(cr.weekly) + ' a week from ' + C.fmtDate(cr.from, { year: true, dow: false }) : ''}</span></span>${status}</div>
+    return h`<div class="card pad stack" style="gap:12px"><div class="between wrap" style="align-items:flex-start;row-gap:8px"><span class="stack" style="gap:2px"><h3>${p.name}</h3><span class="small muted">${p.manager ? 'Managed by ' + p.manager : ''}${cr ? ' · ' + C.money(cr.weekly) + ' a week from ' + C.fmtDate(cr.from, { year: true, dow: false }) : ''}</span></span>${status}</div>
       <div class="list">${bills.map((b) => { const nd = C.nextDue(b, t); return h`<a class="item" href="#/bill/${b.id}" style="padding-left:0;min-height:40px"><span class="grow small">${b.name}${b.payMethod === 'rent' ? h` <span class="xs muted">· taken from rent</span>` : b.payMethod === 'manual' ? h` <span class="xs muted">· you pay</span>` : ''}${b.status === 'pending' ? h` <span class="xs muted">· not started</span>` : ''}${b.expectedChange ? h` <span class="xs" style="color:var(--amber-ink)">· ${b.expectedChange.toLowerCase()}</span>` : ''}</span><span class="mono small">${C.money(C.sumAmounts(C.schedule(d, fy.from, fy.to, t, (x) => x.id === b.id)))}</span></a>`; })}</div>
       <div class="grid3" style="background:var(--inv-soft);border-radius:10px;padding:10px 12px"><div class="stack" style="gap:2px"><span class="xs" style="color:#4E4A6E">Rent ${fy.label.slice(-7)}</span><span class="mono small" style="font-weight:600">${C.money(rent)}</span></div><div class="stack" style="gap:2px"><span class="xs" style="color:#4E4A6E">Costs</span><span class="mono small" style="font-weight:600">${C.money(costs)}</span></div><div class="stack" style="gap:2px"><span class="xs" style="color:#4E4A6E">Net</span><span class="mono small" style="font-weight:600">${C.money(rent - costs)}</span></div></div>
       <div class="grid2 no-print"><button class="btn small sec" data-act="rent" data-id="${p.id}">Rent changed / starts</button><button class="btn small ghost" data-act="editprop" data-id="${p.id}">Edit property</button></div></div>`;
@@ -1097,7 +1102,7 @@ function scrReports() {
   <div class="no-print">${back('#/', 'Reports')}</div>
   <div class="chips no-print">${kinds.map(([k, l]) => h`<button class="chip" data-act="rkind" data-v="${k}" aria-pressed="${S.ui.rKind === k}">${l}</button>`)}</div>
   ${S.ui.rKind === 'custom' ? h`<div class="grid2 no-print"><label class="field">From<input type="date" value="${R.from}" data-input="rFrom"></label><label class="field">To<input type="date" value="${R.to}" data-input="rTo"></label></div>`
-    : h`<div class="between no-print"><button class="btn small ghost" data-act="rshift" data-v="-1">${icon('back', 16)} Previous</button><b class="small" style="text-align:center">${R.label}</b><button class="btn small ghost" data-act="rshift" data-v="1">Next ${icon('next', 16)}</button></div>`}
+    : h`<div class="between wrap no-print" style="row-gap:8px"><button class="btn small ghost" data-act="rshift" data-v="-1">${icon('back', 16)} Previous</button><b class="small" style="text-align:center">${R.label}</b><button class="btn small ghost" data-act="rshift" data-v="1">Next ${icon('next', 16)}</button></div>`}
   <label class="card switch no-print" style="padding:10px 12px"><span class="small" style="font-weight:500">Include investment properties</span><input type="checkbox" data-rinv="1" ${S.ui.rInv ? 'checked' : ''}></label>
   <div class="grid2">
     <div class="tile"><span class="k">${S.ui.rInv ? 'All bills' : 'Household bills'}</span><span class="v">${C.money(total)}</span><span class="xs muted">${items.length} payments · ${C.fmtDate(R.from, { dow: false, year: true })} – ${C.fmtDate(R.to, { dow: false, year: true })}</span></div>
@@ -1181,10 +1186,12 @@ function render() {
     console.error(e);
     app.innerHTML = h`<div class="banner red">Something went wrong showing this screen: ${e.message}</div><a class="btn" href="#/">Back to Upcoming</a>`.toString();
   }
-  document.getElementById('tabs').innerHTML = noTabs ? '' : TABS.map(([href, label, ic]) => h`<a href="${href}" ${tab === href || (href === '#/bills' && ['bill', 'edit', 'kids'].includes(S.route.split('/')[0])) || (href === '#/' && S.route.split('/')[0] === 'ahead') || (href === '#/settings' && ['pay', 'transfers', 'accounts', 'types', 'properties', 'others', 'checkpay', 'alerts', 'sync', 'excel', 'activity', 'health'].includes(S.route.split('/')[0])) ? raw('aria-current="page"') : ''}>${icon(ic)}${label}</a>`).join('');
+  document.getElementById('tabs').innerHTML = noTabs ? '' : TABS.map(([href, label, ic]) => h`<a href="${href}" ${tab === href || (href === '#/bills' && ['bill', 'edit', 'kids'].includes(S.route.split('/')[0])) || (href === '#/' && S.route.split('/')[0] === 'ahead') || (href === '#/settings' && ['pay', 'transfers', 'accounts', 'types', 'properties', 'others', 'checkpay', 'alerts', 'sync', 'excel', 'activity', 'health'].includes(S.route.split('/')[0])) ? raw('aria-current="page"') : ''}>${icon(ic)}<span>${label}</span></a>`).join('');
   document.getElementById('tabs').hidden = noTabs;
-  app.querySelectorAll('form[data-form="bill"]').forEach((f) => { const dr = getDraft(f.dataset.id); if (dr) applyDraft(f, dr); updateShows(f); });
+  app.querySelectorAll('form[data-form="bill"]').forEach((f) => { const dr = getDraft(f.dataset.id); if (dr) applyDraft(f, dr); updateShows(f); kidsBillWarn(f); });
   app.querySelectorAll('form[data-form="kidexp"],form[data-form="kidpay"]').forEach((f) => kidsPreview(f));
+  // 1.46: wide tables scroll sideways inside their card instead of pushing the page wider than the screen
+  app.querySelectorAll('table.t').forEach((tb) => { if (!tb.parentElement.classList.contains('twrap')) { const w = document.createElement('div'); w.className = 'twrap'; tb.before(w); w.appendChild(tb); } });
   if (keepScroll) window.scrollTo(0, y); else window.scrollTo(0, 0);
   if (active) { const el = app.querySelector(`[data-input="${active}"]`); if (el) { el.focus(); const v = el.value; if (el.setSelectionRange && el.type !== 'date') try { el.setSelectionRange(v.length, v.length); } catch {} } }
   lastRoute = S.route;
@@ -1646,6 +1653,21 @@ const kmShort = (ym) => C.monthName(Number(ym.slice(5, 7)) - 1, false);
 function segLink(href, label, on) {
   return h`<a href="${href}" ${on ? raw('aria-current="page"') : ''} style="flex:1 1 0;min-height:40px;border-radius:9px;display:flex;align-items:center;justify-content:center;text-align:center;font-size:14px;${on ? 'background:#fff;color:var(--ink);font-weight:600' : 'color:var(--ink2);font-weight:500'}">${label}</a>`;
 }
+// 1.46 Upcoming: what actually came in from the other parent this pay, and what they still owe (shown, never counted)
+function kidsUpcoming(d, ps, pe, t) {
+  const c = K.cfg(d);
+  const has = (d.kidPayments || []).some((x) => !x.del) || (d.kidExpenses || []).some((x) => !x.del) || K.shares(d).length > 0;
+  if (!has) return { show: false, inPay: 0, owes: 0, other: c.other };
+  const end = pe < t ? pe : t;
+  // with "count shared bills at my share" on, their half is already taken off the bills, so payments aren't added too
+  const inPay = S.dev.kidsHalf ? 0 : C.round2((d.kidPayments || []).filter((p) => !p.del && C.isISO(p.date) && p.date >= ps && p.date <= end && typeof p.amount === 'number').reduce((a, p) => a + (p.direction === 'out' ? -p.amount : p.amount), 0));
+  return { show: true, inPay, owes: K.balanceAt(d, t, t), other: c.other };
+}
+function kidsOwesFlowRow(kh) {
+  const o = kh.owes;
+  const label = Math.abs(o) < 0.005 ? kh.other + ' · all square' : o > 0 ? kh.other + ' still owes · not counted' : 'You owe ' + kh.other + ' · not counted';
+  return h`<a href="#/kids" style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;color:var(--hero-sub);font-size:14px"><span>${label}</span><b>${C.money(Math.abs(o))}</b></a>`;
+}
 function kidsSwitch(cur) {
   return h`<nav class="seg no-print" aria-label="Bills or Kids">${segLink('#/bills', 'All bills', cur === 'bills')}${segLink('#/kids', 'Kids · ' + K.cfg(doc()).children.join(' & '), cur === 'kids')}</nav>`;
 }
@@ -1892,7 +1914,7 @@ function kidsShareCard(b, isNew) {
   const s = !isNew && b.id ? K.shareFor(d, b.id) : null;
   return h`<div class="card pad stack-lg" style="${s ? 'border-color:var(--brand)' : ''}">
     <label class="switch"><span class="stack" style="gap:2px"><b style="font-size:15px">Shared</b><span class="small muted">Split with ${c.other} — counted in Kids only. The bill itself isn't changed.</span></span><input type="checkbox" name="kidsShared" ${s ? 'checked' : ''}></label>
-    <div class="stack-lg" data-show="kidsShared=on">${kidsShareForm(b, s, c, t)}</div>
+    <div class="stack-lg" data-show="kidsShared=on">${kidsShareForm(b, s, c, t)}<div id="kidwarn" aria-live="polite"></div></div>
   </div>`;
 }
 function kidsShareFromForm(form, fd, b, t) {
@@ -1901,6 +1923,8 @@ function kidsShareFromForm(form, fd, b, t) {
   const pct = Number(fd.get('kidsPct'));
   if (!(pct > 0 && pct <= 100)) return { err: "Set " + K.cfg(doc()).other + "'s share between 1 and 100%." };
   const from = C.isISO(fd.get('kidsFrom')) ? fd.get('kidsFrom') : (C.isISO(b.startDate) ? b.startDate : C.isISO(b.refDate) ? b.refDate : t);
+  const clash = b.name ? kidsOverlapMsg(doc(), b, from) : '';
+  if (clash) return { err: clash };
   return { child: fd.get('kidsChild') || K.cfg(doc()).children[0], payer: fd.get('kidsPayer') === 'other' ? 'other' : 'me', otherPct: pct, from };
 }
 // Did anything on the bill form change, apart from the Shared section?
@@ -1931,9 +1955,21 @@ function kidsDetailRow(b) {
   const c = K.cfg(doc());
   return h`<a href="#/kids" style="color:inherit">${detailRow('Shared', K.childLabel(doc(), s.child) + ' · ' + c.other + ' ' + (s.otherPct ?? 50) + '% · from ' + C.fmtDate(s.from, { dow: false, year: true }))}</a>`;
 }
-// Imported tab 6 rows that a shared bill would count again from this date
-function kidsOverlap(d, b, from) {
-  return (d.kidExpenses || []).filter((e) => !e.del && e.billHint && K.matches(b.name, e.billHint) && e.date >= from).length;
+// 1.46: rows brought in from tab 6 that a shared bill would count again from this date
+function kidsOverlap(d, b, from) { return K.overlapRows(d, b, from); }
+function kidsBillWarn(form) {
+  const w = form.querySelector('#kidwarn'); if (!w) return;
+  const on = form.querySelector('[name=kidsShared]'); const fr = form.querySelector('[name=kidsFrom]'); const nm = form.querySelector('[name=name]');
+  const old = form.dataset.id ? C.byId(doc().bills, form.dataset.id) : null;
+  const b = { name: (nm && nm.value) || (old && old.name) || '' };
+  const m = on && on.checked && fr && fr.value ? kidsOverlapMsg(doc(), b, fr.value) : '';
+  w.innerHTML = m ? h`<div class="banner red small">${m}</div>`.toString() : '';
+}
+function kidsOverlapMsg(d, b, from) {
+  const rows = kidsOverlap(d, b, from);
+  if (!rows.length) return '';
+  const last = rows.reduce((a, e) => (e.date > a ? e.date : a), rows[0].date);
+  return rows.length + ' payment' + (rows.length > 1 ? 's' : '') + ' for ' + b.name + ' from tab 6 (up to ' + C.fmtDate(last, { dow: false, year: true }) + ') would be counted twice. Set Counted from to ' + C.fmtDate(C.addDays(last, 1), { dow: false, year: true }) + ' or later.';
 }
 
 // ----- settings -----
@@ -1989,7 +2025,7 @@ Object.assign(A, {
     const sh = openSheet(h`<h2>${s ? 'Shared' : 'Share'} — ${b.name}</h2><div class="small muted">${C.money(C.amountOn(b, C.nextDue(b, t) || t, d))} · ${b.freq || ''} · the bill itself isn't changed</div>
       <form data-form="kidshare" data-bill="${b.id}" class="stack-lg">${kidsShareForm(b, s, c, t)}<div id="kidwarn"></div>
       <button class="btn" type="submit">${s ? 'Save' : 'Share it'}</button>${s ? h`<button class="btn danger" type="button" data-act="kidunshare" data-bill="${b.id}">Stop sharing</button>` : ''}</form>`.toString());
-    const f = sh.querySelector('form'); const warn = () => { const n = kidsOverlap(d, b, f.querySelector('[name=kidsFrom]').value); f.querySelector('#kidwarn').innerHTML = n ? h`<div class="banner amber small">${n} expense${n > 1 ? 's' : ''} from tab 6 on or after this date look like this bill. Pick a later date or they'd be counted twice.</div>`.toString() : ''; };
+    const f = sh.querySelector('form'); const warn = () => { const m = kidsOverlapMsg(d, b, f.querySelector('[name=kidsFrom]').value || t); f.querySelector('#kidwarn').innerHTML = m ? h`<div class="banner red small">${m}</div>`.toString() : ''; };
     f.addEventListener('input', warn); warn();
   },
   kidunshare: async (el) => {
@@ -2069,14 +2105,17 @@ Object.assign(F, {
   kidsuggest: async (form) => {
     const d = doc(), fd = new FormData(form);
     const sug = K.suggestShares(d, S.ui.kidSuggest);
-    const pick = sug.filter((x, i) => x.bill && !x.already && fd.get('s' + i) === 'on');
+    const ticked = sug.filter((x, i) => x.bill && !x.already && fd.get('s' + i) === 'on');
+    const pick = ticked.filter((x) => !kidsOverlapMsg(d, x.bill, x.from));
+    const held = ticked.filter((x) => kidsOverlapMsg(d, x.bill, x.from));
+    if (held.length) toast(held.map((x) => x.bill.name).join(', ') + ' not shared — the date would count tab 6 payments twice. Share it from the list with a later date.', 7000);
     await commit(pick.length ? 'Kids: shared ' + pick.map((x) => x.bill.name).join(', ') : null, (dd) => {
       pick.forEach((x) => applyKidsShare(dd, x.bill.id, { child: x.child, payer: x.payer || 'me', otherPct: x.otherPct ?? 50, from: x.from }));
       kidsTouchCfg(dd, (k) => { k.setupDone = true; });
     });
     S.ui.kidSuggest = null;
     location.hash = '#/kids';
-    toast(pick.length ? pick.length + ' bill' + (pick.length > 1 ? 's' : '') + ' shared' : 'Setup done');
+    if (!held.length) toast(pick.length ? pick.length + ' bill' + (pick.length > 1 ? 's' : '') + ' shared' : 'Setup done');
   },
   kidcfg: async (form) => {
     const fd = new FormData(form);
@@ -2125,7 +2164,7 @@ document.addEventListener('change', (e) => {
   if (e.target.dataset.input === 'rFrom' || e.target.dataset.input === 'rTo') { S.ui[e.target.dataset.input] = e.target.value; render(); }
 });
 document.addEventListener('input', (e) => {
-  const bf = e.target.closest && e.target.closest('form[data-form="bill"]'); if (bf) saveDraft(bf);
+  const bf = e.target.closest && e.target.closest('form[data-form="bill"]'); if (bf) { saveDraft(bf); kidsBillWarn(bf); }
   const kf = e.target.closest && e.target.closest('form[data-form="kidexp"],form[data-form="kidpay"]'); if (kf) kidsPreview(kf);
   if (e.target.dataset.input === 'q') { S.ui.q = e.target.value; render(); }
   if (e.target.name === 'amount' && e.target.dataset.cur !== undefined) {
