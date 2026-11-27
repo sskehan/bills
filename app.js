@@ -1,10 +1,20 @@
 // Bills — the phone app. Screens are rebuilt from the saved data on every change.
-import * as C from './core.js';
+import * as Core from './core.js';
+import * as K from './kids.js';
 import * as St from './store.js';
 import { makeSetupCode, readSetupCode, unlock } from './crypto.js';
 import * as DB from './dropbox.js';
 
-const APP_VERSION = '1.44';
+const APP_VERSION = '1.45';
+// 1.45: the Kids "count shared bills at my share" switch (per phone, off by default).
+// With it off, C is exactly core.js. With it on, only schedule() and annualAmount()
+// show your share of bills ticked Shared. Stored data is never changed.
+const halfOn = () => !!(S.dev && S.dev.kidsHalf && S.doc);
+const C = {
+  ...Core,
+  schedule: (d, from, to, t, filter) => { const list = Core.schedule(d, from, to, t, filter); if (!halfOn()) return list; return list.map((i) => { const f = K.myFraction(d, i.bill, i.due); return f < 1 && typeof i.amount === 'number' ? { ...i, amount: Core.round2(i.amount * f), half: f } : i; }); },
+  annualAmount: (b, t, d) => { const v = Core.annualAmount(b, t, d); return halfOn() ? v * K.myFraction(d || S.doc, b, t) : v; },
+};
 import { h, raw, esc, icon, toast, openSheet, closeSheet, confirmSheet, download, pickFile, copyText } from './ui.js';
 
 const PALETTE = [['#4C7A9A', 'Steel blue'], ['#B4643C', 'Copper'], ['#3E8C6D', 'Teal'], ['#BF9330', 'Ochre'], ['#94607F', 'Plum'], ['#5E7A3A', 'Olive'], ['#6559B8', 'Indigo'], ['#B5524A', 'Brick'], ['#8C9096', 'Grey']];
@@ -150,11 +160,11 @@ async function relinkGithub(fileEnv) {
 async function replaceDoc(old, label) {
   old.updatedAt = Date.now();
   const bump = (o) => { if (o && typeof o === 'object') o.u = Date.now(); };
-  const KEYS = ['accounts', 'types', 'properties', 'bills', 'payments', 'people', 'others', 'payOverrides'];
+  const KEYS = ['accounts', 'types', 'properties', 'bills', 'payments', 'people', 'others', 'payOverrides'].concat(Core.KID_COLLECTIONS.filter((k) => old[k] || (S.doc && S.doc[k])));
   KEYS.forEach((k) => (old[k] || []).forEach(bump));
   // anything added since that version is marked deleted so the merge doesn't bring it back
   KEYS.forEach((k) => { old[k] = old[k] || []; const ids = new Set(old[k].map((x) => x.id)); for (const x of (S.doc && S.doc[k]) || []) if (!ids.has(x.id)) old[k].push({ ...x, del: true, u: Date.now() }); });
-  bump(old.settings);
+  bump(old.settings); if (old.kidsCfg) bump(old.kidsCfg);
   old.transferChecks = old.transferChecks || {};
   for (const k of Object.keys(old.transferChecks)) bump(old.transferChecks[k]);
   for (const k of Object.keys((S.doc && S.doc.transferChecks) || {})) if (!old.transferChecks[k]) old.transferChecks[k] = { undone: true, u: Date.now(), by: who() };
@@ -176,8 +186,8 @@ function syncDot() {
 function clampStamps(d) {
   const now = Date.now() - 1000;
   const fix = (o) => { if (o && typeof o === 'object' && typeof o.u === 'number' && o.u > now) o.u = now; };
-  ['accounts', 'types', 'properties', 'bills', 'payments', 'people', 'others', 'payOverrides', 'activity'].forEach((k) => (d[k] || []).forEach(fix));
-  fix(d.settings); Object.values(d.transferChecks || {}).forEach(fix);
+  ['accounts', 'types', 'properties', 'bills', 'payments', 'people', 'others', 'payOverrides', 'activity', ...Core.KID_COLLECTIONS].forEach((k) => (d[k] || []).forEach(fix));
+  fix(d.settings); fix(d.kidsCfg); Object.values(d.transferChecks || {}).forEach(fix);
   if (d.updatedAt > now) d.updatedAt = now;
   return d;
 }
@@ -185,7 +195,7 @@ function clampStamps(d) {
 // ---------- unsaved bill drafts (kept on this phone only, until saved or discarded) ----------
 const DRAFTS = new Map();
 const draftKey = (id) => 'bills-draft:' + (id || 'new');
-const editing = () => S.route.split('/')[0] === 'edit';
+const editing = () => S.route.split('/')[0] === 'edit' || /^kids\/(exp|pay|settings)/.test(S.route); // 1.45: Kids forms aren't redrawn mid-typing either
 function getDraft(id) {
   const k = draftKey(id);
   if (DRAFTS.has(k)) return DRAFTS.get(k);
@@ -253,7 +263,7 @@ function stateCell(i) {
 function billRow(i, opts = {}) {
   const b = i.bill;
   const acc = b.accountId ? C.accountName(doc(), b.accountId) : (b.payMethod === 'rent' ? 'Taken from rent' : '');
-  const sub = opts.sub || [acc, b.freq].filter(Boolean).join(' · ') + weekendNote(b, i.due);
+  const sub = (opts.sub || [acc, b.freq].filter(Boolean).join(' · ') + weekendNote(b, i.due)) + (i.half ? ' · your ' + Math.round(i.half * 100) + '% share' : '');
   return h`<div class="item ${C.settled(i.state) ? 'done' : ''}">${dotFor(b)}<a class="grow stack" style="gap:2px;color:inherit" href="#/bill/${b.id}"><span class="t">${b.name}</span><span class="s">${sub}</span></a><span class="stack" style="gap:4px;align-items:flex-end"><span class="amt">${amt(b, i.amount)}</span>${opts.noState ? '' : stateCell(i)}</span></div>`;
 }
 function relPill(n) {
@@ -507,6 +517,7 @@ function scrBills() {
   const stopped = live.filter((b) => b.status === 'stopped');
   const pc = (d.settings.payCheckPending || []).length;
   return h`${head('All bills', h`<a class="icon-btn brand" href="#/edit/new" aria-label="Add a bill">${icon('plus')}</a>`)}
+  ${kidsSwitch('bills')}
   <label class="card row" style="padding:0 14px;min-height:48px">${icon('search', 18)}<span class="sr">Search bills</span><input id="q" type="search" value="${S.ui.q}" placeholder="Search name, provider or account" style="border:0;outline:0;flex:1;min-width:0;background:transparent;font-size:16px;min-height:46px" data-input="q"></label>
   ${pc ? h`<a class="banner amber" href="#/checkpay" style="color:inherit">Confirm how ${pc} bills are paid →</a>` : ''}
   <div class="grid3"><div class="tile"><span class="k">A year</span><span class="v" style="font-size:15px">${C.money(annual, 0)}</span></div><div class="tile"><span class="k">A month</span><span class="v" style="font-size:15px">${C.money(annual / 12, 0)}</span></div><div class="tile"><span class="k">Per payday</span><span class="v" style="font-size:15px">${C.money(annual / 26, 0)}</span></div></div>
@@ -570,6 +581,7 @@ function scrSettings() {
   ${link('#/types', 'Bill types & colours', (d.types || []).filter((x) => !x.del).length + ' types')}
   ${link('#/properties', 'Investment properties', (d.properties || []).filter((p) => !p.del && p.status !== 'sold').map((p) => p.name).join(' · ') || 'None')}
   ${link('#/others', 'People you pay bills for', (d.others || []).filter((o) => !o.del).map((o) => o.name).join(' · ') || 'None')}
+  ${link('#/kids/settings', 'Kids — shared costs', K.cfg(d).children.join(' & ') + ' · shared with ' + K.cfg(d).other + (S.dev.kidsHalf ? ' · totals at your share' : ''))}
   ${link('#/checkpay', 'How each bill is paid', (d.settings.payCheckPending || []).length ? (d.settings.payCheckPending.length + ' to confirm') : 'All confirmed')}</div>
   <div class="eyebrow">Sharing, backup & Excel</div>
   <div class="card list">${link('#/sync', 'Sharing with Lyndsey & backup', [S.dev.github ? 'GitHub ✓' + (S.dev.lastSync ? ' ' + new Date(S.dev.lastSync).toLocaleString('en-AU', { dateStyle: 'medium', timeStyle: 'short' }) : '') : 'GitHub not connected', DB.isOn(S.dev) ? (S.dbx === 'error' ? 'Dropbox problem' : 'Dropbox ✓') : 'Dropbox not connected'].join(' · '))}
@@ -627,7 +639,7 @@ function scrBill(id) {
     <div class="xs muted">Old payments keep the amount that applied then. Reports list every bill that went up or down.</div></div>
   <div class="card" style="padding:4px 16px">
     ${detailRow('How it’s paid', payLabel)}${b.transferDayBefore ? detailRow('Day-before transfer', 'Savings → ' + (b.accountId ? C.accountName(d, b.accountId) : 'personal')) : ''}
-    ${detailRow('Type', kindLabel)}${detailRow('In household totals', C.inTotals(b) ? 'Yes' : 'No')}
+    ${detailRow('Type', kindLabel)}${detailRow('In household totals', C.inTotals(b) ? 'Yes' : 'No')}${kidsDetailRow(b)}
     ${b.provider ? detailRow('Provider', b.provider) : ''}${b.accountNo ? h`<div class="between" style="padding:12px 0;border-bottom:1px solid var(--line2);font-size:15px"><span class="muted">Policy / account #</span><button class="btn small ghost" data-act="reveal" data-v="${b.accountNo}">•••• tap to show</button></div>` : ''}
     ${b.endDate ? detailRow('Ends on', C.fmtDate(b.endDate, { year: true })) : ''}${b.expectedChange ? detailRow('Expected change', b.expectedChange) : ''}
     ${detailRow('Reminders', b.remind === false ? 'Off' : 'On')}${b.dueText ? detailRow('Spreadsheet due date(s)', b.dueText) : ''}
@@ -706,6 +718,7 @@ function scrEdit(id) {
     <label class="field">Notes<textarea name="notes">${b.notes || ''}</textarea></label>
     <label class="field">Due date(s) as written in the spreadsheet<input name="dueText" value="${b.dueText || ''}"><span class="hint">Only used for the Excel export.</span></label>
   </div>
+  ${kidsShareCard(b, isNew)}
   <button class="btn block" type="submit">${isNew ? 'Add bill' : 'Save changes'}</button>
   </form>`;
 }
@@ -781,10 +794,22 @@ async function saveBillForm(form) {
   if (old && old.status !== 'pending' && old.accountId !== b.accountId && old.accountId && b.payMethod !== 'manual') {
     b.todos = (b.todos || []).concat([{ id: C.uid('td'), text: 'Tell ' + (b.provider || 'the provider') + ' about the new account (' + C.accountName(d, b.accountId) + ')', done: false }]);
   }
+  const want = kidsShareFromForm(form, fd, b, t);
+  if (want && want.err) { form.querySelector('#formerr').innerHTML = h`<div class="banner red">${want.err}</div>`.toString(); form.querySelector('#formerr').scrollIntoView({ block: 'center' }); return; }
+  // 1.45: if only the Shared section changed, the bill itself is left exactly as it was
+  if (old && !billFieldsChanged(form)) {
+    const changed = kidsShareDiffers(d, b.id, want);
+    if (changed) await commit('Kids: ' + (want ? 'shared ' : 'stopped sharing ') + b.name, (dd) => { applyKidsShare(dd, b.id, want); });
+    clearDraft(id);
+    location.hash = '#/bill/' + b.id;
+    toast(changed ? 'Saved' : 'No changes');
+    return;
+  }
   touch(b);
   await commit((old ? 'Edited ' : 'Added ') + b.name + amountNote, (dd) => {
     if (old) dd.bills = dd.bills.map((x) => (x.id === b.id ? b : x)); else dd.bills.push(b);
     if (old && old.payMethod !== b.payMethod) dd.settings.payCheckPending = (dd.settings.payCheckPending || []).filter((x) => x !== b.id);
+    if (kidsShareDiffers(dd, b.id, want)) applyKidsShare(dd, b.id, want);
   });
   clearDraft(id);
   location.hash = '#/bill/' + b.id;
@@ -1138,6 +1163,7 @@ function screen() {
     case 'reports': return scrReports();
     case 'setup': return scrSetup();
     case 'health': return scrHealth();
+    case 'kids': return scrKidsRoute(p);
     default: return scrUpcoming();
   }
 }
@@ -1155,9 +1181,10 @@ function render() {
     console.error(e);
     app.innerHTML = h`<div class="banner red">Something went wrong showing this screen: ${e.message}</div><a class="btn" href="#/">Back to Upcoming</a>`.toString();
   }
-  document.getElementById('tabs').innerHTML = noTabs ? '' : TABS.map(([href, label, ic]) => h`<a href="${href}" ${tab === href || (href === '#/bills' && ['bill', 'edit'].includes(S.route.split('/')[0])) || (href === '#/' && S.route.split('/')[0] === 'ahead') || (href === '#/settings' && ['pay', 'transfers', 'accounts', 'types', 'properties', 'others', 'checkpay', 'alerts', 'sync', 'excel', 'activity', 'health'].includes(S.route.split('/')[0])) ? raw('aria-current="page"') : ''}>${icon(ic)}${label}</a>`).join('');
+  document.getElementById('tabs').innerHTML = noTabs ? '' : TABS.map(([href, label, ic]) => h`<a href="${href}" ${tab === href || (href === '#/bills' && ['bill', 'edit', 'kids'].includes(S.route.split('/')[0])) || (href === '#/' && S.route.split('/')[0] === 'ahead') || (href === '#/settings' && ['pay', 'transfers', 'accounts', 'types', 'properties', 'others', 'checkpay', 'alerts', 'sync', 'excel', 'activity', 'health'].includes(S.route.split('/')[0])) ? raw('aria-current="page"') : ''}>${icon(ic)}${label}</a>`).join('');
   document.getElementById('tabs').hidden = noTabs;
   app.querySelectorAll('form[data-form="bill"]').forEach((f) => { const dr = getDraft(f.dataset.id); if (dr) applyDraft(f, dr); updateShows(f); });
+  app.querySelectorAll('form[data-form="kidexp"],form[data-form="kidpay"]').forEach((f) => kidsPreview(f));
   if (keepScroll) window.scrollTo(0, y); else window.scrollTo(0, 0);
   if (active) { const el = app.querySelector(`[data-input="${active}"]`); if (el) { el.focus(); const v = el.value; if (el.setSelectionRange && el.type !== 'date') try { el.setSelectionRange(v.length, v.length); } catch {} } }
   lastRoute = S.route;
@@ -1611,6 +1638,461 @@ function registerCSV() {
   return rows.map((r) => r.map((v) => { const s = String(v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }).join(',')).join('\r\n');
 }
 
+// ---------- 1.45 Kids (Alex & Emma, shared with their other parent) ----------
+// Everything Kids saves goes in its own lists: kidShares, kidExpenses, kidPayments, kidsCfg.
+// Bills, payments and settings are only read, never written, from here.
+const KM = (ym) => C.monthName(Number(ym.slice(5, 7)) - 1) + ' ' + ym.slice(0, 4);
+const kmShort = (ym) => C.monthName(Number(ym.slice(5, 7)) - 1, false);
+function segLink(href, label, on) {
+  return h`<a href="${href}" ${on ? raw('aria-current="page"') : ''} style="flex:1 1 0;min-height:40px;border-radius:9px;display:flex;align-items:center;justify-content:center;text-align:center;font-size:14px;${on ? 'background:#fff;color:var(--ink);font-weight:600' : 'color:var(--ink2);font-weight:500'}">${label}</a>`;
+}
+function kidsSwitch(cur) {
+  return h`<nav class="seg no-print" aria-label="Bills or Kids">${segLink('#/bills', 'All bills', cur === 'bills')}${segLink('#/kids', 'Kids · ' + K.cfg(doc()).children.join(' & '), cur === 'kids')}</nav>`;
+}
+function kidsTouchCfg(dd, fn) { dd.kidsCfg = JSON.parse(JSON.stringify(dd.kidsCfg || {})); fn(dd.kidsCfg); dd.kidsCfg.u = Date.now(); dd.kidsCfg.by = who(); }
+const kidsList = (dd, k) => { if (!Array.isArray(dd[k])) dd[k] = []; return dd[k]; };
+function kidsOwesText(bal, short) {
+  const c = K.cfg(doc());
+  if (Math.abs(bal) < 0.005) return 'All square';
+  if (short) return bal > 0 ? c.other + ' owes you' : 'You owe ' + c.other;
+  return bal > 0 ? c.other + ' owes you ' + C.money(bal) : 'You owe ' + c.other + ' ' + C.money(-bal);
+}
+function kidsChip(name, v, label, cur) {
+  return h`<label class="chip" style="display:inline-flex;align-items:center;justify-content:center;flex:1 1 0;position:relative" ${cur === v ? raw('aria-pressed="true"') : ''}><input type="radio" name="${name}" value="${v}" ${cur === v ? 'checked' : ''} style="position:absolute;opacity:0;inset:0;margin:0;cursor:pointer">${label}</label>`;
+}
+function kidsRadioPressed(form) { form.querySelectorAll('[data-radio] label').forEach((l) => { const i = l.querySelector('input'); if (i) l.setAttribute('aria-pressed', i.checked ? 'true' : 'false'); }); }
+function kidsChildChips(name, cur) {
+  const c = K.cfg(doc());
+  return h`<div class="row" style="gap:6px" data-radio>${c.children.map((k) => kidsChip(name, k, k, cur))}${kidsChip(name, 'Both', 'Both', cur)}</div>`;
+}
+function kidsEntryRow(e) {
+  const d = doc(), c = K.cfg(d);
+  if (e.kind === 'payment') {
+    const out = e.direction === 'out';
+    return h`<a class="item" href="#/kids/pay/${e.id}" style="background:${out ? '#FFF8EC' : '#F4FAF7'}"><span class="grow stack" style="gap:2px"><span class="t">${out ? 'You paid ' + c.other : 'Payment from ' + c.other}</span><span class="s">${C.fmtDate(e.date, { dow: false })}${e.method ? ' · ' + e.method : ''}${e.forMonth ? ' · for ' + kmShort(e.forMonth) : ''}</span></span><span class="pill ${out ? 'amber' : 'green'} mono">${out ? '+' : '−'}${C.money(e.amount)}</span></a>`;
+  }
+  const href = e.kind === 'bill' ? '#/bill/' + e.billId : '#/kids/exp/' + e.id;
+  const what = e.kind === 'bill' ? 'shared bill' : e.category || 'one-off';
+  return h`<a class="item" href="${href}"><span class="grow stack" style="gap:2px"><span class="t">${K.itemName(d, e)}</span><span class="s">${C.fmtDate(e.date, { dow: false })} · ${e.payer === 'other' ? c.other + ' paid' : 'you paid'} · ${what}</span></span><span class="stack" style="gap:2px;align-items:flex-end"><span class="amt">${C.money(e.amount)}</span><span class="xs ${e.effect >= 0 ? 'muted' : ''}" style="${e.effect < 0 ? 'color:var(--amber-ink)' : ''}">${e.effect >= 0 ? c.other + ' ' + C.money(e.effect) : 'you ' + C.money(-e.effect)}</span></span></a>`;
+}
+
+function scrKidsRoute(p) {
+  switch (p[0]) {
+    case 'exp': return scrKidsExp(p[1]);
+    case 'pay': return scrKidsPay(p[1]);
+    case 'month': return scrKidsMonth(p[1]);
+    case 'year': return scrKidsYear(p[1]);
+    case 'shared': return scrKidsShared();
+    case 'settings': return scrKidsSettings();
+    default: return scrKids();
+  }
+}
+
+function scrKids() {
+  const d = doc(), t = today(), c = K.cfg(d);
+  const bal = K.balanceAt(d, t, t);
+  const ym = t.slice(0, 7), prevYm = C.addMonths(ym + '-01', -1).slice(0, 7);
+  const m = K.month(d, ym, t);
+  const pm = K.month(d, prevYm, t);
+  const lastPay = (d.kidPayments || []).filter((x) => !x.del && x.direction !== 'out' && x.date <= t).sort((a, b) => (a.date < b.date ? 1 : -1))[0];
+  const up = K.upcoming(d, t, 21).slice(0, 6);
+  const recent = K.entries(d, C.addDays(t, -45), t, t).reverse().slice(0, 8);
+  const yr = K.year(d, t.slice(0, 4), t);
+  const nShared = K.shares(d).length;
+  const empty = !nShared && !(d.kidExpenses || []).some((x) => !x.del) && !(d.kidPayments || []).some((x) => !x.del);
+  const sendDue = Number(t.slice(8)) <= 10 && !c.sent[prevYm] && pm.items.length > 0;
+  return h`${head('Kids', h`<a class="icon-btn brand" href="#/kids/exp/new" aria-label="Add a kids expense">${icon('plus')}</a>`)}
+  ${kidsSwitch('kids')}
+  ${!c.setupDone ? h`<div class="card pad stack" style="gap:10px;border-color:var(--brand)"><h3>Set up Kids</h3><div class="small" style="line-height:1.5;color:var(--ink2)">1. Bring in your history from tab 6 (the <b>kids-import</b> file).<br>2. Confirm which bills are shared with ${c.other}.<br>Nothing else in the app changes.</div><div class="grid2"><button class="btn sec" data-act="kidimport">Import tab 6</button><a class="btn" href="#/kids/shared">Shared bills</a></div>${!empty ? h`<button class="btn small ghost" data-act="kidsetupdone" style="align-self:flex-start">I'm done setting up</button>` : ''}</div>` : ''}
+  <div class="hero">
+    <span class="lbl">Balance today</span>
+    <div class="stack" style="gap:2px"><span class="big">${C.money(Math.abs(bal))}</span><span class="sub">${kidsOwesText(bal, true)}</span></div>
+    <div class="trio"><span>${kmShort(ym)} so far<b>${C.money(m.total)}</b></span><span>${m.net >= 0 ? c.other + "'s share" : 'Your share'}<b>${C.money(Math.abs(m.net))}</b></span><span>${lastPay ? 'Paid ' + C.fmtDate(lastPay.date, { dow: false }) : 'Last payment'}<b>${lastPay ? C.money(lastPay.amount) : '—'}</b></span></div>
+  </div>
+  ${sendDue ? h`<a class="banner amber" href="#/kids/month/${prevYm}" style="color:inherit"><b>${KM(prevYm)}</b> statement is ready to send to ${c.other} →</a>` : ''}
+  <div class="grid2"><a class="btn" href="#/kids/exp/new">${icon('plus', 18, 2.4)}Add expense</a><a class="btn sec" href="#/kids/pay/new">${c.other} paid</a></div>
+  <a class="btn ghost" href="#/kids/month/${sendDue || m.items.length === 0 ? prevYm : ym}">${icon('download', 18)}Statements for ${c.other}</a>
+  <div class="between" style="padding:0 2px"><div class="eyebrow" style="padding:0">Coming up · shared bills</div><a class="small" href="#/kids/shared" style="font-weight:600">${nShared} shared</a></div>
+  <div class="card list">${up.length ? up.map((u) => h`<a class="item" href="#/bill/${u.bill.id}">${dotFor(u.bill)}<span class="grow stack" style="gap:2px"><span class="t">${u.bill.name}</span><span class="s">${C.fmtDate(u.date)} · ${K.childLabel(d, u.child)}</span></span><span class="stack" style="gap:2px;align-items:flex-end"><span class="amt">${C.money(u.amount)}</span><span class="xs muted">${u.payer === 'other' ? 'you ' : c.other + ' '}${C.money(u.theirPart)}</span></span></a>`) : h`<div class="empty">${nShared ? 'No shared bills in the next 3 weeks.' : 'No bills are shared yet — tick Shared on a bill, or use Shared bills above.'}</div>`}</div>
+  <div class="between" style="padding:0 2px"><div class="eyebrow" style="padding:0">Recent</div><a class="small" href="#/kids/month/${ym}" style="font-weight:600">This month</a></div>
+  <div class="card list">${recent.length ? recent.map(kidsEntryRow) : h`<div class="empty">Nothing in the last 45 days.</div>`}</div>
+  <div class="eyebrow">${t.slice(0, 4)} so far</div>
+  <a class="grid3" href="#/kids/year/${t.slice(0, 4)}" style="color:inherit"><div class="tile"><span class="k">Spent</span><span class="v" style="font-size:15px">${C.money(yr.total)}</span></div><div class="tile"><span class="k">You paid</span><span class="v" style="font-size:15px">${C.money(yr.paidMe)}</span></div><div class="tile"><span class="k">${c.other} repaid</span><span class="v" style="font-size:15px">${C.money(C.round2(yr.received - yr.paidOut))}</span></div></a>
+  <div class="card list"><a class="item" href="#/kids/year/${t.slice(0, 4)}"><span class="grow t">Month by month & year-end</span>${icon('next', 18)}</a><a class="item" href="#/kids/shared"><span class="grow t">Shared bills</span>${icon('next', 18)}</a><a class="item" href="#/kids/settings"><span class="grow t">Kids settings</span>${icon('next', 18)}</a></div>`;
+}
+
+// ----- one-off expense -----
+function scrKidsExp(id) {
+  const d = doc(), t = today(), c = K.cfg(d);
+  const isNew = !id || id === 'new';
+  const e = isNew ? { date: t, child: c.children[0], payer: 'me', otherPct: c.pct, category: '' } : C.byId(d.kidExpenses, id);
+  if (!e) return h`${back('#/kids', 'Expense not found')}`;
+  const lock = !isNew && K.locked(d, e.date);
+  return h`${back('#/kids', isNew ? 'Add kids expense' : 'Kids expense', 'One-off · shared with ' + c.other)}
+  ${lock ? h`<div class="banner amber">${e.date.slice(0, 4)} is closed, so this can't be changed. Reopen the year on the year screen if you need to.</div>` : ''}
+  <form data-form="kidexp" data-id="${isNew ? '' : e.id}" class="stack-lg" novalidate>
+  <div id="formerr"></div>
+  <fieldset ${lock ? 'disabled' : ''} style="border:0;padding:0;margin:0;min-width:0" class="stack-lg">
+  <div class="card pad stack-lg">
+    <div class="stack" style="gap:8px"><span class="field" style="gap:0">For</span>${kidsChildChips('child', e.child)}</div>
+    <label class="field">What for<input name="desc" value="${e.desc || ''}" required autocomplete="off" placeholder="e.g. School excursion"></label>
+    <div class="grid2"><label class="field">Amount ($)<input class="money" name="amount" type="number" inputmode="decimal" step="0.01" min="0" value="${e.amount ?? ''}" placeholder="0.00"></label><label class="field">Date<input type="date" name="date" value="${e.date}"></label></div>
+    <div class="stack" style="gap:8px"><span class="field" style="gap:0">Who paid</span><div class="row" style="gap:6px" data-radio>${kidsChip('payer', 'me', 'Me (' + c.me + ')', e.payer)}${kidsChip('payer', 'other', c.other, e.payer)}</div></div>
+    <label class="field">${c.other}'s share (%)<input name="otherPct" type="number" inputmode="decimal" step="1" min="0" max="100" value="${e.otherPct ?? c.pct}"><span class="hint">50 = split evenly. 0 = not shared (kept for your records only).</span></label>
+    <label class="field">Category (optional)<select name="category">${opt('', '—', e.category)}${K.CATEGORIES.map((x) => opt(x, x, e.category))}</select></label>
+    <label class="field">Notes (optional)<input name="notes" value="${e.notes || ''}" autocomplete="off"></label>
+  </div>
+  <div class="banner green" id="kidprev" style="display:flex;justify-content:space-between;align-items:center;gap:10px"></div>
+  ${!lock ? h`<button class="btn block" type="submit">${isNew ? 'Save expense' : 'Save changes'}</button>` : ''}
+  </fieldset>
+  </form>
+  ${!isNew && !lock ? h`<button class="btn ghost small" data-act="kiddel" data-k="kidExpenses" data-id="${e.id}" style="align-self:center">Delete this expense</button>` : ''}
+  ${e.src === 'tab6' ? h`<div class="xs muted" style="text-align:center">Brought in from tab 6.</div>` : ''}`;
+}
+// ----- payment between the parents -----
+function scrKidsPay(id) {
+  const d = doc(), t = today(), c = K.cfg(d);
+  const isNew = !id || id === 'new';
+  const bal = K.balanceAt(d, t, t);
+  const p = isNew ? { date: t, direction: bal >= 0 ? 'in' : 'out', method: 'Bank transfer', forMonth: '' } : C.byId(d.kidPayments, id);
+  if (!p) return h`${back('#/kids', 'Payment not found')}`;
+  const lock = !isNew && K.locked(d, p.date);
+  const months = [0, 1, 2, 3].map((k) => C.addMonths(t.slice(0, 7) + '-01', -k).slice(0, 7));
+  if (p.forMonth && !months.includes(p.forMonth)) months.push(p.forMonth);
+  const prevNet = K.month(d, months[1], t).net;
+  return h`${back('#/kids', isNew ? 'Record a payment' : 'Payment', 'Money between you and ' + c.other)}
+  ${lock ? h`<div class="banner amber">${p.date.slice(0, 4)} is closed, so this can't be changed.</div>` : ''}
+  <form data-form="kidpay" data-id="${isNew ? '' : p.id}" data-bal="${bal}" data-edit="${isNew ? 0 : (p.direction === 'out' ? p.amount : -p.amount)}" class="stack-lg" novalidate>
+  <div id="formerr"></div>
+  <fieldset ${lock ? 'disabled' : ''} style="border:0;padding:0;margin:0;min-width:0" class="stack-lg">
+  <div class="card pad stack-lg">
+    <div class="stack" style="gap:8px"><span class="field" style="gap:0">Who paid who</span><div class="row" style="gap:6px" data-radio>${kidsChip('direction', 'in', c.other + ' paid me', p.direction)}${kidsChip('direction', 'out', 'I paid ' + c.other, p.direction)}</div></div>
+    <div class="grid2"><label class="field">Amount ($)<input class="money" name="amount" type="number" inputmode="decimal" step="0.01" min="0" value="${p.amount ?? ''}" placeholder="0.00"></label><label class="field">Date<input type="date" name="date" value="${p.date}"></label></div>
+    ${isNew && Math.abs(bal) >= 0.01 ? h`<div class="chips"><button type="button" class="chip" data-act="kidfill" data-v="${Math.abs(bal).toFixed(2)}">Whole balance ${C.money(Math.abs(bal))}</button>${Math.abs(prevNet) >= 0.01 ? h`<button type="button" class="chip" data-act="kidfill" data-v="${Math.abs(prevNet).toFixed(2)}">${kmShort(months[1])} only ${C.money(Math.abs(prevNet))}</button>` : ''}</div>` : ''}
+    <label class="field">How<select name="method">${K.METHODS.map((x) => opt(x, x, p.method))}</select></label>
+    <label class="field">For month (optional)<select name="forMonth">${opt('', '—', p.forMonth)}${months.map((ym) => opt(ym, KM(ym), p.forMonth))}</select></label>
+    <label class="field">Notes (optional)<input name="notes" value="${p.notes || ''}" autocomplete="off"></label>
+  </div>
+  <div class="hero" style="padding:14px 18px" id="kidprev"></div>
+  ${!lock ? h`<button class="btn block" type="submit">${isNew ? 'Save payment' : 'Save changes'}</button>` : ''}
+  </fieldset>
+  </form>
+  ${!isNew && !lock ? h`<button class="btn ghost small" data-act="kiddel" data-k="kidPayments" data-id="${p.id}" style="align-self:center">Delete this payment</button>` : ''}`;
+}
+// live line under the expense / payment form
+function kidsPreview(form) {
+  const el = form.querySelector('#kidprev'); if (!el) return;
+  const fd = new FormData(form), c = K.cfg(doc());
+  const amount = Number(fd.get('amount')) || 0;
+  if (form.dataset.form === 'kidexp') {
+    const eff = K.effect(amount, fd.get('payer'), Number(fd.get('otherPct')));
+    const now = K.balanceAt(doc(), today(), today());
+    const id = form.dataset.id, old = id ? C.byId(doc().kidExpenses, id) : null;
+    const counted = (x) => x && x.date <= today() ? K.effect(x.amount, x.payer, x.otherPct) : 0;
+    const after = C.round2(now - counted(old) + (fd.get('date') <= today() ? eff : 0));
+    el.innerHTML = h`<span class="stack" style="gap:2px"><b>${eff >= 0 ? c.other + ' owes you for this' : 'You owe ' + c.other + ' for this'}</b><span class="xs">Balance after saving: ${kidsOwesText(after)}${fd.get('date') > today() ? ' (counts from ' + C.fmtDate(fd.get('date'), { dow: false }) + ')' : ''}</span></span><span class="mono" style="font-size:20px;font-weight:600">${C.money(Math.abs(eff))}</span>`.toString();
+  } else {
+    const bal = Number(form.dataset.bal) || 0, edit = Number(form.dataset.edit) || 0;
+    const eff = fd.get('direction') === 'out' ? amount : -amount;
+    const after = C.round2(bal - edit + (fd.get('date') <= today() ? eff : 0));
+    el.innerHTML = h`<div class="grid2"><span class="stack" style="gap:2px;font-size:12px;color:var(--hero-sub)">${form.dataset.id ? 'Without this payment' : 'Now'}<b class="mono" style="font-size:18px;color:#fff">${C.money(Math.abs(C.round2(bal - edit)))}</b><span>${kidsOwesText(C.round2(bal - edit), true)}</span></span><span class="stack" style="gap:2px;font-size:12px;color:var(--hero-sub)">After this payment<b class="mono" style="font-size:18px;color:#5FC4A4">${C.money(Math.abs(after))}</b><span>${kidsOwesText(after, true)}</span></span></div>`.toString();
+  }
+}
+
+// ----- monthly statement -----
+function scrKidsMonth(ym) {
+  const d = doc(), t = today(), c = K.cfg(d);
+  if (!/^\d{4}-\d{2}$/.test(ym || '')) ym = t.slice(0, 7);
+  const m = K.month(d, ym, t);
+  const prev = C.addMonths(ym + '-01', -1).slice(0, 7), next = C.addMonths(ym + '-01', 1).slice(0, 7);
+  return h`${back('#/kids', 'Statement for ' + c.other, 'What she receives — print to PDF or send as text')}
+  <div class="card row no-print" style="justify-content:space-between;padding:4px"><a class="back" href="#/kids/month/${prev}" aria-label="Previous month">${icon('back')}</a><b>${KM(ym)}</b>${next <= t.slice(0, 7) ? h`<a class="back" href="#/kids/month/${next}" aria-label="Next month">${icon('next')}</a>` : h`<span style="width:44px"></span>`}</div>
+  <div class="card pad stack" style="gap:12px">
+    <div class="stack" style="gap:2px"><span class="eyebrow" style="padding:0">Kids' expenses · ${KM(ym)}${m.partial ? ' (to ' + C.fmtDate(m.asAt, { dow: false }) + ')' : ''}</span><span class="small" style="color:var(--ink2)">${c.children.join(' & ')} · prepared by ${c.me}</span></div>
+    ${m.items.length ? h`<table class="t"><thead><tr><th>Date</th><th>Item</th><th class="r">Amount</th></tr></thead><tbody>${m.items.map((e) => h`<tr style="${e.payer === 'other' ? 'background:var(--amber-bg)' : ''}"><td style="white-space:nowrap">${C.fmtDate(e.date, { dow: false })}</td><td>${K.itemName(d, e)}<div class="xs muted">${e.payer === 'other' ? c.other : c.me} paid${e.kind === 'bill' ? ' · recurring' : ''}${typeof e.otherPct === 'number' && e.otherPct !== 50 ? ' · ' + c.other + ' ' + e.otherPct + '%' : ''}</div></td><td class="r">${C.money(e.amount)}</td></tr>`)}</tbody></table>` : h`<div class="small muted">No expenses this month.</div>`}
+    <div class="stack" style="gap:0">
+      ${detailRow('Total spent', C.money(m.total))}
+      ${detailRow(c.other + "'s share of what " + c.me + ' paid', C.money(m.otherOwes))}
+      ${detailRow(c.me + "'s share of what " + c.other + ' paid', (m.iOwe ? '−' : '') + C.money(m.iOwe))}
+      <div class="between" style="padding:12px 0;font-weight:700"><span>${m.net >= 0 ? 'This month: ' + c.other + ' owes ' + c.me : 'This month: ' + c.me + ' owes ' + c.other}</span><span class="mono">${C.money(Math.abs(m.net))}</span></div>
+      ${m.received ? detailRow('Paid by ' + c.other + ' this month', C.money(m.received)) : ''}${m.paidOut ? detailRow('Paid by ' + c.me + ' this month', C.money(m.paidOut)) : ''}
+    </div>
+    <div class="banner green between"><span class="small">${K.balanceLine(d, m.balance, m.asAt).replace(/: .*/, '')}, after all payments</span><b class="mono">${Math.abs(m.balance) < 0.005 ? 'All square' : C.money(Math.abs(m.balance))}</b></div>
+    <div class="xs muted">${Math.abs(m.balance) < 0.005 ? '' : (m.balance > 0 ? c.other + ' owes ' + c.me : c.me + ' owes ' + c.other) + ' at ' + C.fmtDate(m.asAt, { dow: false, year: true }) + '.'}</div>
+  </div>
+  <div class="grid2 no-print"><button class="btn" data-act="kidprint" data-ym="${ym}">${icon('download', 18)}Save as PDF</button><button class="btn sec" data-act="kidshare" data-ym="${ym}">Send as text</button></div>
+  <div class="xs muted no-print" style="text-align:center">PDF: your phone's print screen opens — choose “Save as PDF”, then share it. ${c.sent[ym] ? 'Last sent ' + new Date(c.sent[ym]).toLocaleDateString('en-AU', { day: 'numeric', month: 'short' }) + '.' : ''}</div>`;
+}
+
+// ----- year -----
+function scrKidsYear(y) {
+  const d = doc(), t = today(), c = K.cfg(d);
+  if (!/^\d{4}$/.test(y || '')) y = t.slice(0, 4);
+  const Y = K.year(d, y, t);
+  const max = Math.max(1, ...Y.months.map((m) => m.total || 0));
+  const closed = c.closed[y];
+  const canClose = !closed && t > y + '-12-31';
+  return h`${back('#/kids', y + ' · Kids', 'Brought forward: ' + kidsOwesText(Y.broughtForward))}
+  <div class="card row no-print" style="justify-content:space-between;padding:4px"><a class="back" href="#/kids/year/${Number(y) - 1}" aria-label="Previous year">${icon('back')}</a><b>${y}</b>${Number(y) < Number(t.slice(0, 4)) ? h`<a class="back" href="#/kids/year/${Number(y) + 1}" aria-label="Next year">${icon('next')}</a>` : h`<span style="width:44px"></span>`}</div>
+  <div class="card pad stack" style="gap:10px">
+    <div class="between"><h3>Spent each month</h3><span class="row xs" style="gap:10px"><span class="row" style="gap:4px"><span class="dot" style="background:var(--brand)"></span>You</span><span class="row" style="gap:4px"><span class="dot" style="background:var(--amber)"></span>${c.other}</span></span></div>
+    <div style="display:flex;align-items:flex-end;gap:5px;height:130px;border-bottom:1px solid #BDBDB6" role="img" aria-label="Kids spending by month">${Y.months.map((m) => h`<a href="#/kids/month/${m.ym}" style="flex:1 1 0;height:100%;display:flex;flex-direction:column-reverse;gap:2px" aria-label="${KM(m.ym)}"><span style="display:block;height:${Math.round((m.paidMe || 0) / max * 124)}px;background:var(--brand);border-radius:${m.paidOther ? '0' : '3px 3px 0 0'}"></span>${m.paidOther ? h`<span style="display:block;height:${Math.max(2, Math.round(m.paidOther / max * 124))}px;background:var(--amber);border-radius:3px 3px 0 0"></span>` : ''}</a>`)}</div>
+    <div style="display:flex;gap:5px">${Y.months.map((m) => h`<span style="flex:1;text-align:center;font-size:10px;color:var(--muted)">${kmShort(m.ym).slice(0, 1)}</span>`)}</div>
+    <table class="t"><thead><tr><th>Month</th><th class="r">Total</th><th class="r">You</th><th class="r">${c.other}</th></tr></thead><tbody>
+    ${Y.months.filter((m) => !m.future).map((m) => h`<tr><td><a href="#/kids/month/${m.ym}">${kmShort(m.ym)}</a>${m.partial ? h` <span class="muted">(to date)</span>` : ''}</td><td class="r">${C.money(m.total)}</td><td class="r">${C.money(m.paidMe)}</td><td class="r">${m.paidOther ? C.money(m.paidOther) : '—'}</td></tr>`)}
+    <tr><td><b>Total</b></td><td class="r"><b>${C.money(Y.total)}</b></td><td class="r"><b>${C.money(Y.paidMe)}</b></td><td class="r"><b>${C.money(Y.paidOther)}</b></td></tr></tbody></table>
+  </div>
+  <div class="card" style="padding:4px 16px">
+    ${detailRow('Brought forward', kidsOwesText(Y.broughtForward))}
+    ${detailRow(c.other + "'s share of what you paid", C.money(Y.otherOwes))}
+    ${detailRow("Your share of what " + c.other + ' paid', '−' + C.money(Y.iOwe))}
+    ${detailRow('Paid by ' + c.other + ' (' + Y.pays.filter((p) => p.direction !== 'out').length + ')', '−' + C.money(Y.received))}
+    ${Y.paidOut ? detailRow('Paid by you', C.money(Y.paidOut)) : ''}
+    <div class="between" style="padding:12px 0;font-weight:700"><span>${t > y + '-12-31' ? 'At 31 Dec' : 'Today'}</span><span>${kidsOwesText(Y.closing)}</span></div>
+  </div>
+  <div class="stack" style="gap:6px"><div class="between" style="padding:0 2px"><h3>Payments</h3><a class="small" href="#/kids/pay/new" style="font-weight:600">Add</a></div>
+  <div class="card list">${Y.pays.length ? Y.pays.slice().reverse().map(kidsEntryRow) : h`<div class="empty">No payments in ${y}.</div>`}</div></div>
+  <div class="card pad stack ${closed ? '' : 'warn'}" style="gap:10px"><h3>${closed ? y + ' is closed' : 'Close ' + y}</h3>
+    <div class="small" style="line-height:1.5;color:var(--ink2)">${closed ? 'Closed ' + new Date(closed.at).toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' }) + (closed.by ? ' by ' + closed.by : '') + '. Balance carried into ' + (Number(y) + 1) + ': ' + kidsOwesText(closed.balance) + '. Its expenses and payments are locked.' : 'Available from 1 January ' + (Number(y) + 1) + '. Locks ' + y + "'s expenses and payments so its statements stay final. Everything stays in history, and the balance simply carries on into " + (Number(y) + 1) + '.'}</div>
+    ${closed ? h`<button class="btn small ghost" data-act="kidreopen" data-y="${y}" style="align-self:flex-start">Reopen ${y}</button>` : h`<button class="btn sec" data-act="kidclose" data-y="${y}" ${canClose ? '' : 'disabled'}>Close ${y} & carry forward</button>`}
+  </div>`;
+}
+
+// ----- shared bills -----
+function scrKidsShared() {
+  const d = doc(), t = today(), c = K.cfg(d);
+  const sh = K.shares(d);
+  const shBills = sh.map((s) => ({ s, b: C.byId(d.bills, s.billId) })).filter((x) => x.b);
+  const sug = S.ui.kidSuggest ? K.suggestShares(d, S.ui.kidSuggest) : [];
+  const others = C.liveBills(d).filter((b) => b.status !== 'stopped' && b.kind !== 'reminder' && !K.shareFor(d, b.id)).sort((a, b) => a.name.localeCompare(b.name));
+  const sum = (s, b) => K.childLabel(d, s.child) + ' · ' + (s.payer === 'other' ? c.other + ' pays it' : 'you pay it') + ' · ' + c.other + ' ' + (s.otherPct ?? 50) + '% · from ' + C.fmtDate(s.from, { dow: false, year: true });
+  return h`${back('#/kids', 'Shared bills', 'Bills split with ' + c.other)}
+  <div class="small" style="color:var(--ink2);line-height:1.5;margin-top:-6px">These are your normal bills — Kids only counts them. Amounts and due dates are changed in Bills, and alerts don't change.</div>
+  ${sug.length ? h`<div class="card pad stack" style="gap:10px;border-color:var(--brand)"><h3>From tab 6 — confirm these</h3>
+    <form data-form="kidsuggest" class="stack" style="gap:0">${sug.map((x, i) => h`<label class="switch" style="padding:10px 0;border-bottom:1px solid var(--line2)"><span class="stack" style="gap:2px"><b style="font-size:15px">${x.bill ? x.bill.name : x.label}</b><span class="xs muted">${x.already ? 'Already shared' : x.bill ? K.childLabel(d, x.child) + ' · ' + c.other + ' ' + x.otherPct + '% · from ' + C.fmtDate(x.from, { dow: false, year: true }) : x.candidates.length > 1 ? 'More than one bill matches — share it from the list below' : 'Not in the app yet — add it in Bills, then tick Shared'}</span></span><input type="checkbox" name="s${i}" ${x.bill && !x.already ? 'checked' : 'disabled'}></label>`)}
+    <button class="btn" type="submit" style="margin-top:12px">Confirm</button></form></div>` : ''}
+  <div class="eyebrow">Shared · ${shBills.length}</div>
+  <div class="card list">${shBills.length ? shBills.map(({ s, b }) => h`<button class="item" data-act="kidsharesheet" data-bill="${b.id}">${dotFor(b)}<span class="grow stack" style="gap:2px"><span class="t">${b.name}</span><span class="s">${sum(s, b)}${b.status === 'stopped' ? ' · bill stopped' : ''}</span></span>${icon('next', 18)}</button>`) : h`<div class="empty">None yet.</div>`}</div>
+  <div class="eyebrow">Your other bills</div>
+  <div class="card list">${others.length ? others.map((b) => h`<div class="item">${dotFor(b)}<span class="grow t">${b.name}</span><button class="btn small sec" data-act="kidsharesheet" data-bill="${b.id}">Share</button></div>`) : h`<div class="empty">No other bills.</div>`}</div>
+  <a class="btn ghost" href="#/edit/new">Add a new bill (tick Shared on it)</a>`;
+}
+function kidsShareForm(b, s, c, t) {
+  const nd = b.id ? C.nextDue(b, t) : null;
+  const from = (s && s.from) || nd || ''; // blank on a new bill = counted from when the bill starts
+  return h`<div class="stack" style="gap:8px"><span class="field" style="gap:0">For</span>${kidsChildChips('kidsChild', (s && s.child) || c.children[0])}</div>
+    <div class="stack" style="gap:8px"><span class="field" style="gap:0">Who pays the provider</span><div class="row" style="gap:6px" data-radio>${kidsChip('kidsPayer', 'me', 'Me', (s && s.payer) || 'me')}${kidsChip('kidsPayer', 'other', c.other, (s && s.payer) || 'me')}</div></div>
+    <div class="grid2"><label class="field">${c.other}'s share (%)<input name="kidsPct" type="number" inputmode="decimal" min="1" max="100" step="1" value="${s ? s.otherPct ?? 50 : c.pct}"></label>
+    <label class="field">Counted from<input type="date" name="kidsFrom" value="${from}"></label></div>
+    <span class="hint xs muted">Payments from this date count in Kids${b.id ? '' : ' (blank = from when the bill starts)'}. Use the date it started, unless the history already came in from tab 6.</span>`;
+}
+// The Shared section on the bill's own edit screen. Saved to Kids only.
+function kidsShareCard(b, isNew) {
+  const d = doc(), t = today(), c = K.cfg(d);
+  const s = !isNew && b.id ? K.shareFor(d, b.id) : null;
+  return h`<div class="card pad stack-lg" style="${s ? 'border-color:var(--brand)' : ''}">
+    <label class="switch"><span class="stack" style="gap:2px"><b style="font-size:15px">Shared</b><span class="small muted">Split with ${c.other} — counted in Kids only. The bill itself isn't changed.</span></span><input type="checkbox" name="kidsShared" ${s ? 'checked' : ''}></label>
+    <div class="stack-lg" data-show="kidsShared=on">${kidsShareForm(b, s, c, t)}</div>
+  </div>`;
+}
+function kidsShareFromForm(form, fd, b, t) {
+  if (!form.querySelector('[name=kidsShared]')) return null;
+  if (fd.get('kidsShared') !== 'on') return null;
+  const pct = Number(fd.get('kidsPct'));
+  if (!(pct > 0 && pct <= 100)) return { err: "Set " + K.cfg(doc()).other + "'s share between 1 and 100%." };
+  const from = C.isISO(fd.get('kidsFrom')) ? fd.get('kidsFrom') : (C.isISO(b.startDate) ? b.startDate : C.isISO(b.refDate) ? b.refDate : t);
+  return { child: fd.get('kidsChild') || K.cfg(doc()).children[0], payer: fd.get('kidsPayer') === 'other' ? 'other' : 'me', otherPct: pct, from };
+}
+// Did anything on the bill form change, apart from the Shared section?
+function billFieldsChanged(form) {
+  for (const el of form.elements) {
+    if (!el.name || el.name.startsWith('kids')) continue;
+    if (el.type === 'checkbox' || el.type === 'radio') { if (el.checked !== el.defaultChecked) return true; }
+    else if (el.tagName === 'SELECT') { const def = [...el.options].find((o) => o.defaultSelected) || el.options[0]; if ((def ? def.value : '') !== el.value) return true; }
+    else if (el.value !== el.defaultValue) return true;
+  }
+  return false;
+}
+function kidsShareDiffers(dd, billId, want) {
+  const s = (dd.kidShares || []).find((x) => x.billId === billId && !x.del && x.on !== false);
+  if (!want) return !!s;
+  return !s || s.child !== want.child || s.payer !== want.payer || s.otherPct !== want.otherPct || s.from !== want.from;
+}
+function applyKidsShare(dd, billId, want) {
+  const list = kidsList(dd, 'kidShares');
+  const s = list.find((x) => x.billId === billId && !x.del);
+  if (!want) { if (s) { s.on = false; touch(s); } return; }
+  if (s) Object.assign(s, want, { on: true }, { u: Date.now(), by: who() });
+  else list.push(touch({ id: C.uid('ks'), billId, on: true, ...want }));
+}
+function kidsDetailRow(b) {
+  const s = K.shareFor(doc(), b.id);
+  if (!s) return '';
+  const c = K.cfg(doc());
+  return h`<a href="#/kids" style="color:inherit">${detailRow('Shared', K.childLabel(doc(), s.child) + ' · ' + c.other + ' ' + (s.otherPct ?? 50) + '% · from ' + C.fmtDate(s.from, { dow: false, year: true }))}</a>`;
+}
+// Imported tab 6 rows that a shared bill would count again from this date
+function kidsOverlap(d, b, from) {
+  return (d.kidExpenses || []).filter((e) => !e.del && e.billHint && K.matches(b.name, e.billHint) && e.date >= from).length;
+}
+
+// ----- settings -----
+function scrKidsSettings() {
+  const d = doc(), c = K.cfg(d);
+  return h`${back('#/kids', 'Kids settings')}
+  <form data-form="kidcfg" class="card pad stack-lg">
+    <label class="field">Children<input name="children" value="${c.children.join(', ')}" autocomplete="off"><span class="hint">Separate names with a comma.</span></label>
+    <div class="grid2"><label class="field">Other parent<input name="other" value="${c.other}" autocomplete="off"></label><label class="field">Your name<input name="me" value="${c.me}" autocomplete="off"></label></div>
+    <label class="field">${c.other}'s usual share (%)<input name="pct" type="number" min="1" max="100" step="1" value="${c.pct}"></label>
+    <div class="grid2"><label class="field">Starting balance ($)<input class="money" name="openAmt" type="number" step="0.01" value="${c.opening.amount || 0}"><span class="hint">+ = ${c.other} owed you</span></label><label class="field">As at<input type="date" name="openDate" value="${c.opening.date === '2000-01-01' ? '' : c.opening.date}"></label></div>
+    <button class="btn" type="submit">Save</button>
+  </form>
+  <div class="card" style="padding:4px 16px"><label class="switch" style="padding:14px 0"><span class="stack" style="gap:2px"><b style="font-size:15px">Count shared bills at my share</b><span class="small muted">This phone only. Upcoming, Calendar, Bills and Reports show your ${100 - c.pct}% of shared bills. Off = full amounts, exactly as before. Alerts and transfers always use full amounts.</span></span><input type="checkbox" data-act="kidhalf" ${S.dev.kidsHalf ? 'checked' : ''}></label></div>
+  <div class="card list">
+    <button class="item" data-act="kidimport"><span class="grow stack" style="gap:2px"><span class="t">Import tab 6 history</span><span class="s">Safe to run again — rows already brought in are skipped</span></span>${icon('next', 18)}</button>
+    <a class="item" href="#/kids/shared"><span class="grow t">Shared bills</span>${icon('next', 18)}</a>
+  </div>
+  <div class="card pad small muted" style="line-height:1.5">${c.other} never has access to this. She only sees a statement you choose to send.</div>`;
+}
+
+Object.assign(A, {
+  kidhalf: async (el) => { S.dev.kidsHalf = el.checked; await saveDev(); render(); toast(el.checked ? 'Totals now show your share of shared bills' : 'Totals back to full amounts'); },
+  kidfill: (el) => { const f = el.closest('form'); f.querySelector('[name=amount]').value = el.dataset.v; kidsPreview(f); },
+  kidsetupdone: async () => { await commit(null, (dd) => kidsTouchCfg(dd, (k) => { k.setupDone = true; })); },
+  kiddel: async (el) => {
+    const k = el.dataset.k, x = C.byId(doc()[k], el.dataset.id); if (!x) return;
+    if (!(await confirmSheet(k === 'kidPayments' ? 'Delete this payment?' : 'Delete this expense?', esc((x.desc || 'Payment') + ' · ' + C.money(x.amount) + ' · ' + C.fmtDate(x.date, { year: true })), 'Delete', true))) return;
+    await commit('Kids: deleted ' + (x.desc || 'payment') + ' ' + C.money(x.amount), (dd) => { const y = (dd[k] || []).find((z) => z.id === x.id); if (y) { y.del = true; touch(y); } });
+    location.hash = '#/kids'; toast('Deleted');
+  },
+  kidprint: async (el) => { await kidsMarkSent(el.dataset.ym); setTimeout(() => window.print(), 50); },
+  kidshare: async (el) => {
+    const d = doc(), m = K.month(d, el.dataset.ym, today()), text = K.statementText(d, m);
+    let done = false;
+    if (navigator.share) { try { await navigator.share({ title: "Kids' expenses — " + KM(el.dataset.ym), text }); done = true; } catch (e) { if (e && e.name === 'AbortError') return; } }
+    if (!done) await copyText(text);
+    await kidsMarkSent(el.dataset.ym);
+  },
+  kidclose: async (el) => {
+    const y = el.dataset.y, d = doc(), t = today(), bal = K.balanceAt(d, y + '-12-31', t);
+    if (!(await confirmSheet('Close ' + y + '?', esc('Locks ' + y + "'s expenses and payments. Balance carried into " + (Number(y) + 1) + ': ' + kidsOwesText(bal) + '. You can reopen it later.'), 'Close ' + y))) return;
+    await commit('Kids: closed ' + y, (dd) => kidsTouchCfg(dd, (k) => { k.closed = k.closed || {}; k.closed[y] = { at: Date.now(), by: who(), balance: bal }; }));
+  },
+  kidreopen: async (el) => {
+    const y = el.dataset.y;
+    if (!(await confirmSheet('Reopen ' + y + '?', 'Its expenses and payments can be changed again. Statements already sent may then no longer match.', 'Reopen'))) return;
+    await commit('Kids: reopened ' + y, (dd) => kidsTouchCfg(dd, (k) => { if (k.closed) delete k.closed[y]; }));
+  },
+  kidsharesheet: (el) => {
+    const d = doc(), t = today(), c = K.cfg(d), b = C.byId(d.bills, el.dataset.bill); if (!b) return;
+    const s = K.shareFor(d, b.id);
+    const sh = openSheet(h`<h2>${s ? 'Shared' : 'Share'} — ${b.name}</h2><div class="small muted">${C.money(C.amountOn(b, C.nextDue(b, t) || t, d))} · ${b.freq || ''} · the bill itself isn't changed</div>
+      <form data-form="kidshare" data-bill="${b.id}" class="stack-lg">${kidsShareForm(b, s, c, t)}<div id="kidwarn"></div>
+      <button class="btn" type="submit">${s ? 'Save' : 'Share it'}</button>${s ? h`<button class="btn danger" type="button" data-act="kidunshare" data-bill="${b.id}">Stop sharing</button>` : ''}</form>`.toString());
+    const f = sh.querySelector('form'); const warn = () => { const n = kidsOverlap(d, b, f.querySelector('[name=kidsFrom]').value); f.querySelector('#kidwarn').innerHTML = n ? h`<div class="banner amber small">${n} expense${n > 1 ? 's' : ''} from tab 6 on or after this date look like this bill. Pick a later date or they'd be counted twice.</div>`.toString() : ''; };
+    f.addEventListener('input', warn); warn();
+  },
+  kidunshare: async (el) => {
+    const b = C.byId(doc().bills, el.dataset.bill);
+    closeSheet();
+    await commit('Kids: stopped sharing ' + b.name, (dd) => applyKidsShare(dd, b.id, null));
+    toast('No longer shared — past months keep nothing from it');
+  },
+  kidimport: async () => {
+    const f = await pickFile(); if (!f) return;
+    let j; try { j = JSON.parse(f.text); } catch { return toast('That file could not be read', 4000); }
+    let plan; try { plan = K.planImport(doc(), j, today()); } catch (e) { return toast(e.message, 5000); }
+    const fromBill = plan.skipped.filter((x) => x.why === 'covered by the shared bill').length;
+    if (!plan.exps.length && !plan.pays.length) { S.ui.kidSuggest = j; location.hash = '#/kids/shared'; return toast('Already imported — nothing new in that file', 4000); }
+    if (!(await confirmSheet('Import tab 6 history?', esc('Adds ' + plan.exps.length + ' expenses and ' + plan.pays.length + ' payments to Kids.' + (fromBill ? ' ' + fromBill + ' rows are left out because a shared bill already counts them.' : '') + (plan.skipped.length - fromBill ? ' ' + (plan.skipped.length - fromBill) + ' were imported before.' : '') + ' Nothing outside Kids is changed.'), 'Import'))) return;
+    await commit('Kids: imported tab 6 (' + plan.exps.length + ' expenses, ' + plan.pays.length + ' payments)', (dd) => {
+      const ex = kidsList(dd, 'kidExpenses'), pa = kidsList(dd, 'kidPayments');
+      plan.exps.forEach((x) => ex.push(touch({ ...x })));
+      plan.pays.forEach((x) => pa.push(touch({ ...x })));
+      const fc = j.cfg || {};
+      kidsTouchCfg(dd, (k) => {
+        if (!k.children && fc.children) k.children = fc.children;
+        if (!k.other && fc.other) k.other = fc.other;
+        if (!k.me && fc.me) k.me = fc.me;
+        if (!k.opening && j.opening) k.opening = j.opening;
+      });
+    });
+    S.ui.kidSuggest = j;
+    location.hash = '#/kids/shared';
+    toast('Imported — now confirm the shared bills', 5000);
+  },
+});
+async function kidsMarkSent(ym) { await commit(null, (dd) => kidsTouchCfg(dd, (k) => { k.sent = k.sent || {}; k.sent[ym] = Date.now(); })); }
+
+Object.assign(F, {
+  kidexp: async (form) => {
+    const d = doc(), fd = new FormData(form), id = form.dataset.id, c = K.cfg(d);
+    const old = id ? C.byId(d.kidExpenses, id) : null;
+    const e = { child: fd.get('child') || c.children[0], desc: (fd.get('desc') || '').trim(), amount: Number(fd.get('amount')), date: fd.get('date'), payer: fd.get('payer') === 'other' ? 'other' : 'me', otherPct: Number(fd.get('otherPct')), category: fd.get('category') || '', notes: (fd.get('notes') || '').trim() };
+    const errs = [];
+    if (!e.desc) errs.push('Say what it was for.');
+    if (!(e.amount > 0) || e.amount > 1000000) errs.push('Add the amount.');
+    if (!C.isISO(e.date)) errs.push('Pick the date.');
+    if (!(e.otherPct >= 0 && e.otherPct <= 100)) errs.push('The share must be 0–100%.');
+    if (C.isISO(e.date) && K.locked(d, e.date)) errs.push(e.date.slice(0, 4) + ' is closed — reopen it first.');
+    if (errs.length) { form.querySelector('#formerr').innerHTML = h`<div class="banner red">${errs.join(' ')}</div>`.toString(); return; }
+    await commit('Kids: ' + (old ? 'edited ' : 'added ') + e.desc + ' ' + C.money(e.amount), (dd) => {
+      const list = kidsList(dd, 'kidExpenses');
+      if (old) { const x = list.find((z) => z.id === old.id); Object.assign(x, e); touch(x); } else list.push(touch({ id: C.uid('kx'), ...e }));
+    });
+    location.hash = '#/kids'; toast(old ? 'Saved' : 'Expense added');
+  },
+  kidpay: async (form) => {
+    const d = doc(), fd = new FormData(form), id = form.dataset.id;
+    const old = id ? C.byId(d.kidPayments, id) : null;
+    const p = { direction: fd.get('direction') === 'out' ? 'out' : 'in', amount: Number(fd.get('amount')), date: fd.get('date'), method: fd.get('method') || '', forMonth: fd.get('forMonth') || '', notes: (fd.get('notes') || '').trim() };
+    const errs = [];
+    if (!(p.amount > 0) || p.amount > 1000000) errs.push('Add the amount.');
+    if (!C.isISO(p.date)) errs.push('Pick the date.');
+    if (C.isISO(p.date) && K.locked(d, p.date)) errs.push(p.date.slice(0, 4) + ' is closed — reopen it first.');
+    if (errs.length) { form.querySelector('#formerr').innerHTML = h`<div class="banner red">${errs.join(' ')}</div>`.toString(); return; }
+    await commit('Kids: ' + (old ? 'edited payment ' : (p.direction === 'out' ? 'paid ' + K.cfg(d).other + ' ' : 'payment from ' + K.cfg(d).other + ' ')) + C.money(p.amount), (dd) => {
+      const list = kidsList(dd, 'kidPayments');
+      if (old) { const x = list.find((z) => z.id === old.id); Object.assign(x, p); touch(x); } else list.push(touch({ id: C.uid('kp'), ...p }));
+    });
+    location.hash = '#/kids'; toast(old ? 'Saved' : 'Payment saved');
+  },
+  kidshare: async (form) => {
+    const d = doc(), t = today(), b = C.byId(d.bills, form.dataset.bill); if (!b) return;
+    const want = kidsShareFromForm({ querySelector: () => true }, (() => { const fd = new FormData(form); fd.set('kidsShared', 'on'); return fd; })(), b, t);
+    if (want.err) return toast(want.err, 4000);
+    closeSheet();
+    if (!kidsShareDiffers(d, b.id, want)) return toast('No changes');
+    await commit('Kids: shared ' + b.name, (dd) => applyKidsShare(dd, b.id, want));
+    toast('Shared — counted in Kids from ' + C.fmtDate(want.from, { dow: false }));
+  },
+  kidsuggest: async (form) => {
+    const d = doc(), fd = new FormData(form);
+    const sug = K.suggestShares(d, S.ui.kidSuggest);
+    const pick = sug.filter((x, i) => x.bill && !x.already && fd.get('s' + i) === 'on');
+    await commit(pick.length ? 'Kids: shared ' + pick.map((x) => x.bill.name).join(', ') : null, (dd) => {
+      pick.forEach((x) => applyKidsShare(dd, x.bill.id, { child: x.child, payer: x.payer || 'me', otherPct: x.otherPct ?? 50, from: x.from }));
+      kidsTouchCfg(dd, (k) => { k.setupDone = true; });
+    });
+    S.ui.kidSuggest = null;
+    location.hash = '#/kids';
+    toast(pick.length ? pick.length + ' bill' + (pick.length > 1 ? 's' : '') + ' shared' : 'Setup done');
+  },
+  kidcfg: async (form) => {
+    const fd = new FormData(form);
+    const children = String(fd.get('children') || '').split(',').map((x) => x.trim()).filter(Boolean);
+    const pct = Number(fd.get('pct'));
+    if (!children.length) return toast('Add at least one child');
+    if (!(pct > 0 && pct <= 100)) return toast('The share must be 1–100%');
+    const od = fd.get('openDate');
+    await commit('Kids: settings changed', (dd) => kidsTouchCfg(dd, (k) => {
+      k.children = children; k.other = String(fd.get('other') || '').trim() || 'Heidi'; k.me = String(fd.get('me') || '').trim() || 'Me'; k.pct = pct;
+      k.opening = { date: C.isISO(od) ? od : (k.opening && k.opening.date) || '2000-01-01', amount: Number(fd.get('openAmt')) || 0 };
+    }));
+    toast('Saved');
+  },
+});
+
 // ---------- events ----------
 document.addEventListener('click', (e) => {
   const el = e.target.closest('[data-act]');
@@ -1639,10 +2121,12 @@ document.addEventListener('change', (e) => {
   }
   if (e.target.matches('[data-autosave]')) { const f = e.target.closest('form[data-form]'); F[f.dataset.form](f); }
   if (e.target.matches('[data-rinv]')) A.rinv(e.target);
+  { const kf = e.target.closest('form[data-form="kidexp"],form[data-form="kidpay"],form[data-form="kidshare"]'); if (kf) { kidsRadioPressed(kf); if (kf.dataset.form !== 'kidshare') kidsPreview(kf); } }
   if (e.target.dataset.input === 'rFrom' || e.target.dataset.input === 'rTo') { S.ui[e.target.dataset.input] = e.target.value; render(); }
 });
 document.addEventListener('input', (e) => {
   const bf = e.target.closest && e.target.closest('form[data-form="bill"]'); if (bf) saveDraft(bf);
+  const kf = e.target.closest && e.target.closest('form[data-form="kidexp"],form[data-form="kidpay"]'); if (kf) kidsPreview(kf);
   if (e.target.dataset.input === 'q') { S.ui.q = e.target.value; render(); }
   if (e.target.name === 'amount' && e.target.dataset.cur !== undefined) {
     const p = document.getElementById('amtprev'); const cur = Number(e.target.dataset.cur), v = Number(e.target.value);

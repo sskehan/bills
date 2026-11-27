@@ -11,5 +11,6 @@ transfers, yearly reviews, pay fortnights, investment properties and reports.
 
 All files sit at the top level (no folders): `index.html`, `styles.css`, `sw.js`
 (offline), `manifest.webmanifest`, the app code (`app.js`, `core.js` — every
-calculation, also used by the alert job — `crypto.js`, `store.js`, `ui.js`),
+calculation, also used by the alert job — `kids.js` (Kids: costs shared with
+Alex & Emma's mum), `crypto.js`, `store.js`, `ui.js`),
 icons, IBM Plex fonts (SIL Open Font License) and `qrcode.js` (MIT, Kazuhiko Arase).

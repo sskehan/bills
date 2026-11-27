@@ -458,6 +458,7 @@ export function priceChanges(doc, from, to) {
 
 // ---------- merging two copies (Shaun's and Lyndsey's phones) ----------
 const COLLECTIONS = ['accounts', 'types', 'properties', 'bills', 'payments', 'people', 'others', 'payOverrides'];
+export const KID_COLLECTIONS = ['kidShares', 'kidExpenses', 'kidPayments'];
 function mergeList(a = [], b = []) {
   const map = new Map();
   for (const x of a) map.set(x.id, x);
@@ -469,6 +470,9 @@ export function mergeDocs(a, b) {
   const out = { ...a };
   for (const k of COLLECTIONS) out[k] = mergeList(a[k], b[k]);
   out.settings = ((b.settings && b.settings.u) || 0) > ((a.settings && a.settings.u) || 0) ? b.settings : a.settings;
+  // 1.45 Kids lists — only written when a copy has them, so older copies are left exactly as they were
+  for (const k of KID_COLLECTIONS) if (a[k] || b[k]) out[k] = mergeList(a[k], b[k]);
+  if (a.kidsCfg || b.kidsCfg) out.kidsCfg = ((b.kidsCfg && b.kidsCfg.u) || 0) > ((a.kidsCfg && a.kidsCfg.u) || 0) ? b.kidsCfg : a.kidsCfg;
   const tc = { ...(a.transferChecks || {}) };
   for (const [k, v] of Object.entries(b.transferChecks || {})) if (!tc[k] || (v.u || 0) > (tc[k].u || 0)) tc[k] = v;
   out.transferChecks = tc;
